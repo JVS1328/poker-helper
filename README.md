@@ -54,3 +54,31 @@ npx tailwindcss init -p
 
 # Start application
 npm start
+```
+
+## Project Structure
+```
+src/
+├── components/
+│   └── PokerUI.jsx      # Main UI component
+├── poker-logic.js       # Game logic and decision engine
+├── App.js              
+└── index.css           # Tailwind imports
+```
+
+## Usage
+
+1. Select your hole cards
+2. Input community cards (if any)
+3. Select your position
+4. Enter number of players
+5. Input pot size and current bet
+6. Enter your stack size
+7. Click "Calculate Best Move"
+
+## Strategy Notes
+
+1. Position heavily influences decision making
+2. Stack sizes affect bet sizing
+3. Preflop hand selection is position-dependent
+4. Postflop decisions consider pot odds and implied odds

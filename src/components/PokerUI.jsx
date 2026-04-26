@@ -30,6 +30,17 @@ const seatToBucket = (seat) => {
   return 'early'; // UTG, UTG+1, UTG+2
 };
 
+// What you post on a new hand based on your seat.
+// stackDelta = chips taken from your stack; toCall = what's still owed to match the BB.
+const blindPost = (seat, bigBlind) => {
+  if (seat === 'BB') return { stackDelta: -bigBlind, toCall: 0 };
+  if (seat === 'SB' || seat === 'BTN/SB') {
+    const sb = Math.floor(bigBlind / 2);
+    return { stackDelta: -sb, toCall: bigBlind - sb };
+  }
+  return { stackDelta: 0, toCall: bigBlind };
+};
+
 const SEAT_GLOSSARY = {
   'BTN': 'Button — dealer chip. Best seat: acts last postflop.',
   'BTN/SB': 'Button + Small Blind (heads-up). Acts first preflop, second postflop.',
@@ -146,15 +157,30 @@ const PokerUI = () => {
   }, [pickerSlot, holeCards, communityCards, findNextEmpty]);
 
   const newHand = useCallback(() => {
+    const nextIndex = (seatIndex + (rotateForward ? 1 : -1) + numPlayers) % numPlayers;
+    const nextSeat = seatOrderForPlayers(numPlayers)[nextIndex];
+    const { stackDelta, toCall } = blindPost(nextSeat, bigBlind);
     setHoleCards(['', '']);
     setCommunityCards(['', '', '', '', '']);
     setRevealedStreets(0);
-    // Reset pot/bet to the blinds (SB + BB), and "to call" = the BB
     setPotSize(Math.round(bigBlind * 1.5));
-    setCurrentBet(bigBlind);
+    setCurrentBet(toCall);
+    if (stackDelta) setStackSize(s => s + stackDelta);
     setPickerSlot(null);
-    setSeatIndex(prev => (prev + (rotateForward ? 1 : -1) + numPlayers) % numPlayers);
-  }, [numPlayers, bigBlind, rotateForward]);
+    setSeatIndex(nextIndex);
+  }, [seatIndex, numPlayers, bigBlind, rotateForward]);
+
+  const callBet = useCallback(() => {
+    if (currentBet <= 0 || currentBet > stackSize) return;
+    setStackSize(s => s - currentBet);
+    setPotSize(p => p + currentBet);
+    setCurrentBet(0);
+  }, [currentBet, stackSize]);
+
+  const wonHand = useCallback(() => {
+    setStackSize(s => s + potSize);
+    newHand();
+  }, [potSize, newHand]);
 
   const rotateSeatBy = useCallback((delta) => {
     setSeatIndex(prev => (prev + delta + numPlayers) % numPlayers);
@@ -165,8 +191,8 @@ const PokerUI = () => {
   const dealRiver = useCallback(() => { if (revealedStreets === 4) setRevealedStreets(5); }, [revealedStreets]);
 
   // Refs so the keydown handler doesn't re-bind every render
-  const refs = useRef({ newHand, dealFlop, dealTurn, dealRiver });
-  useEffect(() => { refs.current = { newHand, dealFlop, dealTurn, dealRiver }; });
+  const refs = useRef({ newHand, dealFlop, dealTurn, dealRiver, callBet, wonHand });
+  useEffect(() => { refs.current = { newHand, dealFlop, dealTurn, dealRiver, callBet, wonHand }; });
 
   useEffect(() => {
     const handleKey = (e) => {
@@ -179,6 +205,8 @@ const PokerUI = () => {
         case 'f': e.preventDefault(); refs.current.dealFlop(); break;
         case 't': e.preventDefault(); refs.current.dealTurn(); break;
         case 'r': e.preventDefault(); refs.current.dealRiver(); break;
+        case 'c': e.preventDefault(); refs.current.callBet(); break;
+        case 'w': e.preventDefault(); refs.current.wonHand(); break;
         default: break;
       }
     };
@@ -271,6 +299,25 @@ const PokerUI = () => {
 
         {/* Street controls */}
         <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={callBet}
+            disabled={currentBet <= 0 || currentBet > stackSize}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed"
+            title="Pay the current bet — moves chips from your stack into the pot"
+          >
+            Call ${currentBet} <kbd className="ml-1 px-1 py-0.5 bg-white/20 rounded text-xs">c</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={wonHand}
+            disabled={!handReady}
+            className="px-4 py-2 bg-amber-500 text-white rounded hover:bg-amber-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed"
+            title="You won — collect the pot and start the next hand"
+          >
+            Won <kbd className="ml-1 px-1 py-0.5 bg-white/20 rounded text-xs">w</kbd>
+          </button>
+          <span className="w-px bg-gray-200 mx-1" aria-hidden="true" />
           <button
             type="button"
             onClick={dealFlop}
@@ -442,6 +489,8 @@ const PokerUI = () => {
 
         <div className="text-xs text-gray-500 border-t pt-3">
           <span className="font-semibold">Shortcuts:</span>{' '}
+          <kbd className="px-1 bg-gray-100 rounded border">c</kbd> call ·{' '}
+          <kbd className="px-1 bg-gray-100 rounded border">w</kbd> won ·{' '}
           <kbd className="px-1 bg-gray-100 rounded border">n</kbd> new hand (rotates seat) ·{' '}
           <kbd className="px-1 bg-gray-100 rounded border">f</kbd> flop ·{' '}
           <kbd className="px-1 bg-gray-100 rounded border">t</kbd> turn ·{' '}

@@ -2,17 +2,15 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { PokerLogic, parseCard } from '../poker-logic';
 import CardPickerGrid from './CardPickerGrid';
 import CardSlot from './CardSlot';
-import CalibrationOverlay from './CalibrationOverlay';
 import {
   startCapture, stopCapture, isActive as isCaptureActive,
-  captureRegion, subscribe as subscribeCapture,
+  captureFullFrame, subscribe as subscribeCapture,
 } from '../screen-capture';
-import { readRegion, CONFIDENCE_THRESHOLD } from '../vlm-client';
+import { readTableState, CONFIDENCE_THRESHOLD } from '../vlm-client';
 
 const pokerLogic = new PokerLogic();
 
 const PERSIST_KEY = 'poker-helper:settings';
-const REGION_KEYS = ['hole', 'board', 'pot', 'stack'];
 
 // Seat order starting from the button, going clockwise (which matches how
 // the button moves between hands — so cycling this list = next hand's seat).
@@ -110,17 +108,7 @@ const loadPersisted = () => {
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    // Drop pre-fractional regions: any value > 1 means it was stored in raw
-    // pixels. Fractional regions are always in [0, 1].
-    if (parsed?.regions) {
-      const looksLegacy = REGION_KEYS.some(k => {
-        const r = parsed.regions[k];
-        return r && (r.x > 1 || r.y > 1 || r.w > 1 || r.h > 1);
-      });
-      if (looksLegacy) parsed.regions = null;
-    }
-    return parsed;
+    return JSON.parse(raw);
   } catch {
     return null;
   }
@@ -145,8 +133,6 @@ const PokerUI = () => {
   // Screen-read feature state
   const [screenReadEnabled, setScreenReadEnabled] = useState(persisted?.screenReadEnabled ?? false);
   const [apiKey, setApiKey] = useState(persisted?.apiKey ?? '');
-  const [regions, setRegions] = useState(persisted?.regions ?? null);
-  const [calibrationOpen, setCalibrationOpen] = useState(false);
   const [captureActive, setCaptureActive] = useState(isCaptureActive());
   const [reading, setReading] = useState(false);
   const [lastRead, setLastRead] = useState(null); // { at, ok, applied:[], skipped:[], error? }
@@ -170,11 +156,11 @@ const PokerUI = () => {
         PERSIST_KEY,
         JSON.stringify({
           numPlayers, seatIndex, stackSize, bigBlind, rotateForward,
-          screenReadEnabled, apiKey, regions,
+          screenReadEnabled, apiKey,
         })
       );
     } catch { /* ignore */ }
-  }, [numPlayers, seatIndex, stackSize, bigBlind, rotateForward, screenReadEnabled, apiKey, regions]);
+  }, [numPlayers, seatIndex, stackSize, bigBlind, rotateForward, screenReadEnabled, apiKey]);
 
   const allUsedCards = useMemo(
     () => [...holeCards, ...communityCards.slice(0, revealedStreets)].filter(Boolean),
@@ -272,97 +258,74 @@ const PokerUI = () => {
 
   const readScreen = useCallback(async () => {
     if (reading) return;
-    if (!apiKey) { setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: 'API key not set.' }); return; }
-    if (!regions || REGION_KEYS.some(k => !regions[k])) {
-      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: 'Click Calibrate to draw the four regions first.' });
+    if (!apiKey) {
+      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: 'API key not set.' });
       return;
     }
     if (!isCaptureActive()) {
-      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: 'Screen capture not running. Click Calibrate or Start capture.' });
+      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: 'Screen capture not running. Click Start capture.' });
       return;
     }
 
     setReading(true);
     try {
-      const images = {};
-      for (const key of REGION_KEYS) images[key] = captureRegion(regions[key]);
-      const results = await Promise.allSettled(
-        REGION_KEYS.map(key => readRegion(key, images[key], { apiKey }))
-      );
-
+      const image = captureFullFrame();
+      const r = await readTableState(image, { apiKey });
       const applied = [];
       const skipped = [];
 
-      const byKey = {};
-      results.forEach((r, i) => { byKey[REGION_KEYS[i]] = r; });
-
-      // Hole cards
-      const hole = byKey.hole;
-      if (hole.status === 'fulfilled') {
-        const v = hole.value;
-        if (v.confidence >= CONFIDENCE_THRESHOLD && v.cards.length === 2) {
-          setHoleCards([v.cards[0], v.cards[1]]);
-          applied.push(`hole (${v.cards.join(' ')})`);
-        } else {
-          skipped.push(`hole (conf ${v.confidence.toFixed(2)}, ${v.cards.length} cards)`);
-        }
+      // Hole cards — require exactly 2.
+      if (r.holeCards.confidence >= CONFIDENCE_THRESHOLD && r.holeCards.cards.length === 2) {
+        setHoleCards([r.holeCards.cards[0], r.holeCards.cards[1]]);
+        applied.push(`hole (${r.holeCards.cards.join(' ')})`);
       } else {
-        skipped.push(`hole (${hole.reason?.message || 'error'})`);
+        skipped.push(`hole (conf ${r.holeCards.confidence.toFixed(2)}, ${r.holeCards.cards.length} cards)`);
       }
 
-      // Board
-      const board = byKey.board;
-      if (board.status === 'fulfilled') {
-        const v = board.value;
-        if (v.confidence >= CONFIDENCE_THRESHOLD && (v.cards.length === 0 || v.cards.length === 3 || v.cards.length === 4 || v.cards.length === 5)) {
-          const padded = [...v.cards, '', '', '', '', ''].slice(0, 5);
-          setCommunityCards(padded);
-          setRevealedStreets(v.cards.length);
-          applied.push(`board (${v.cards.length}: ${v.cards.join(' ') || '—'})`);
-        } else {
-          skipped.push(`board (conf ${v.confidence.toFixed(2)}, ${v.cards.length} cards)`);
-        }
+      // Board — accept 0, 3, 4, or 5 (poker-legal counts).
+      const boardLen = r.board.cards.length;
+      if (r.board.confidence >= CONFIDENCE_THRESHOLD && (boardLen === 0 || boardLen === 3 || boardLen === 4 || boardLen === 5)) {
+        const padded = [...r.board.cards, '', '', '', '', ''].slice(0, 5);
+        setCommunityCards(padded);
+        setRevealedStreets(boardLen);
+        applied.push(`board (${boardLen}: ${r.board.cards.join(' ') || '—'})`);
       } else {
-        skipped.push(`board (${board.reason?.message || 'error'})`);
+        skipped.push(`board (conf ${r.board.confidence.toFixed(2)}, ${boardLen} cards)`);
       }
 
       // Pot
-      const pot = byKey.pot;
-      if (pot.status === 'fulfilled') {
-        const v = pot.value;
-        if (v.confidence >= CONFIDENCE_THRESHOLD && typeof v.amount === 'number') {
-          setPotSize(Math.round(v.amount));
-          applied.push(`pot ($${Math.round(v.amount)})`);
-        } else {
-          skipped.push(`pot (conf ${v.confidence.toFixed(2)})`);
-        }
+      if (r.pot.confidence >= CONFIDENCE_THRESHOLD && typeof r.pot.amount === 'number') {
+        setPotSize(Math.round(r.pot.amount));
+        applied.push(`pot ($${Math.round(r.pot.amount)})`);
       } else {
-        skipped.push(`pot (${pot.reason?.message || 'error'})`);
+        skipped.push(`pot (conf ${r.pot.confidence.toFixed(2)})`);
+      }
+
+      // To call
+      if (r.toCall.confidence >= CONFIDENCE_THRESHOLD && typeof r.toCall.amount === 'number') {
+        setCurrentBet(Math.round(r.toCall.amount));
+        applied.push(`to call ($${Math.round(r.toCall.amount)})`);
+      } else {
+        skipped.push(`to call (conf ${r.toCall.confidence.toFixed(2)})`);
       }
 
       // Stack
-      const stack = byKey.stack;
-      if (stack.status === 'fulfilled') {
-        const v = stack.value;
-        if (v.confidence >= CONFIDENCE_THRESHOLD && typeof v.amount === 'number') {
-          setStackSize(Math.round(v.amount));
-          applied.push(`stack ($${Math.round(v.amount)})`);
-        } else {
-          skipped.push(`stack (conf ${v.confidence.toFixed(2)})`);
-        }
+      if (r.stack.confidence >= CONFIDENCE_THRESHOLD && typeof r.stack.amount === 'number') {
+        setStackSize(Math.round(r.stack.amount));
+        applied.push(`stack ($${Math.round(r.stack.amount)})`);
       } else {
-        skipped.push(`stack (${stack.reason?.message || 'error'})`);
+        skipped.push(`stack (conf ${r.stack.confidence.toFixed(2)})`);
       }
 
-      setLastRead({ at: Date.now(), ok: applied.length > 0, applied, skipped });
+      setLastRead({ at: Date.now(), ok: applied.length > 0, applied, skipped, notes: r.notes });
     } catch (err) {
       setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: err.message || String(err) });
     } finally {
       setReading(false);
     }
-  }, [reading, apiKey, regions]);
+  }, [reading, apiKey]);
 
-  const screenReadReady = screenReadEnabled && captureActive && apiKey && regions && REGION_KEYS.every(k => regions[k]);
+  const screenReadReady = screenReadEnabled && captureActive && apiKey;
 
   // Tick once a second so the "Read Xs ago" label updates without a manual refresh.
   const [, setNowTick] = useState(0);
@@ -378,7 +341,7 @@ const PokerUI = () => {
 
   useEffect(() => {
     const handleKey = (e) => {
-      if (pickerSlot || calibrationOpen) return;
+      if (pickerSlot) return;
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -399,7 +362,7 @@ const PokerUI = () => {
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [pickerSlot, calibrationOpen, screenReadEnabled]);
+  }, [pickerSlot, screenReadEnabled]);
 
   const openPicker = (type, index) => setPickerSlot({ type, index });
 
@@ -457,14 +420,6 @@ const PokerUI = () => {
                   title="sk-ant-... — stored in localStorage"
                   autoComplete="off"
                 />
-                <button
-                  type="button"
-                  onClick={() => setCalibrationOpen(true)}
-                  className="px-2 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
-                  title="Pick the screen to share and draw the four region boxes"
-                >
-                  {regions && REGION_KEYS.every(k => regions[k]) ? 'Recalibrate' : 'Calibrate'}
-                </button>
                 {captureActive ? (
                   <button
                     type="button"
@@ -472,16 +427,16 @@ const PokerUI = () => {
                     className="px-2 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 rounded border border-gray-300 text-gray-700"
                     title="Stop screen sharing"
                   >
-                    Stop
+                    Stop capture
                   </button>
-                ) : regions && REGION_KEYS.every(k => regions[k]) && (
+                ) : (
                   <button
                     type="button"
                     onClick={handleStartCapture}
                     className="px-2 py-1.5 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700"
-                    title="Resume the screen-sharing stream"
+                    title="Pick the screen / window / tab to share. Pick 'Window' or 'Chrome Tab' so it keeps reading when you alt-tab."
                   >
-                    Start
+                    Start capture
                   </button>
                 )}
                 <ScreenReadStatus
@@ -503,9 +458,9 @@ const PokerUI = () => {
         </div>
         {screenReadEnabled && (
           <div className="-mt-4 text-xs text-gray-500">
-            Press <kbd className="px-1 bg-gray-100 rounded border">space</kbd> to read your hole cards, board, pot, and stack from the shared screen.
+            Press <kbd className="px-1 bg-gray-100 rounded border">space</kbd> to read your hole cards, board, pot, to-call, and stack from the shared screen.
             {!apiKey && <span className="text-amber-600"> · Paste your API key.</span>}
-            {apiKey && (!regions || !REGION_KEYS.every(k => regions[k])) && <span className="text-amber-600"> · Click Calibrate.</span>}
+            {apiKey && !captureActive && <span className="text-amber-600"> · Click Start capture and pick the poker window.</span>}
           </div>
         )}
 
@@ -765,14 +720,6 @@ const PokerUI = () => {
           usedCards={pickerUsedCards}
           onSelect={handleSelectCard}
           onClose={() => setPickerSlot(null)}
-        />
-      )}
-
-      {calibrationOpen && (
-        <CalibrationOverlay
-          initialRegions={regions}
-          onCancel={() => setCalibrationOpen(false)}
-          onSave={(r) => { setRegions(r); setCalibrationOpen(false); }}
         />
       )}
     </div>

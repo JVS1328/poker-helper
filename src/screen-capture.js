@@ -103,3 +103,10 @@ export const captureRegion = (region, { quality = 0.85, maxDim = 1024 } = {}) =>
     height: dh,
   };
 };
+
+// Grab the entire current frame at higher resolution than a region crop —
+// suit pips and chip totals are small, so we want to keep detail. Anthropic's
+// vision pipeline downscales internally to ~1568 px on the long edge, so going
+// above that doesn't help.
+export const captureFullFrame = (opts = {}) =>
+  captureRegion({ x: 0, y: 0, w: 1, h: 1 }, { quality: 0.9, maxDim: 1568, ...opts });

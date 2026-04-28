@@ -69,16 +69,20 @@ export const getSourceSize = () => {
   return { width: v.videoWidth || 0, height: v.videoHeight || 0 };
 };
 
-// Region is { x, y, w, h } in source-pixel coordinates.
+// Region is { x, y, w, h } as fractions (0-1) of the source dimensions.
+// Storing fractions instead of raw pixels means resizing the captured window
+// rescales the boxes proportionally — calibration survives a window resize.
 // Returns a base64-encoded JPEG (without the data: prefix) of just that region.
 export const captureRegion = (region, { quality = 0.85, maxDim = 1024 } = {}) => {
   if (!isActive()) throw new Error('Screen capture is not active.');
   const v = ensureVideo();
   if (!v.videoWidth || !v.videoHeight) throw new Error('Capture stream not ready yet.');
-  const sx = Math.max(0, Math.round(region.x));
-  const sy = Math.max(0, Math.round(region.y));
-  const sw = Math.max(1, Math.round(region.w));
-  const sh = Math.max(1, Math.round(region.h));
+  const W = v.videoWidth;
+  const H = v.videoHeight;
+  const sx = Math.max(0, Math.round(region.x * W));
+  const sy = Math.max(0, Math.round(region.y * H));
+  const sw = Math.max(1, Math.min(W - sx, Math.round(region.w * W)));
+  const sh = Math.max(1, Math.min(H - sy, Math.round(region.h * H)));
 
   // Downscale large crops so we don't blow API request size on huge screens.
   const scale = Math.min(1, maxDim / Math.max(sw, sh));

@@ -62,13 +62,14 @@ const CalibrationOverlay = ({ initialRegions, onSave, onCancel }) => {
     };
   }, []);
 
-  const cssToSource = useCallback((cssX, cssY) => {
+  // Returns the rendered <video> rectangle inside its bounding box, accounting
+  // for object-fit: contain letterboxing.
+  const getRenderedBox = useCallback(() => {
     const v = videoRef.current;
-    if (!v) return { x: 0, y: 0 };
+    if (!v) return null;
     const rect = v.getBoundingClientRect();
     const { width: srcW, height: srcH } = getSourceSize();
-    if (!srcW || !srcH || !rect.width || !rect.height) return { x: 0, y: 0 };
-    // The video is rendered with object-fit: contain — figure out the letterbox.
+    if (!srcW || !srcH || !rect.width || !rect.height) return null;
     const cssRatio = rect.width / rect.height;
     const srcRatio = srcW / srcH;
     let renderedW, renderedH, offsetX, offsetY;
@@ -83,43 +84,33 @@ const CalibrationOverlay = ({ initialRegions, onSave, onCancel }) => {
       offsetX = 0;
       offsetY = (rect.height - renderedH) / 2;
     }
-    const localX = cssX - rect.left - offsetX;
-    const localY = cssY - rect.top - offsetY;
-    const clampedX = Math.max(0, Math.min(renderedW, localX));
-    const clampedY = Math.max(0, Math.min(renderedH, localY));
-    return {
-      x: (clampedX / renderedW) * srcW,
-      y: (clampedY / renderedH) * srcH,
-    };
+    return { rect, renderedW, renderedH, offsetX, offsetY };
   }, []);
 
-  const sourceToCss = useCallback((region) => {
-    const v = videoRef.current;
-    if (!v || !region) return null;
-    const rect = v.getBoundingClientRect();
-    const { width: srcW, height: srcH } = getSourceSize();
-    if (!srcW || !srcH || !rect.width) return null;
-    const cssRatio = rect.width / rect.height;
-    const srcRatio = srcW / srcH;
-    let renderedW, renderedH, offsetX, offsetY;
-    if (cssRatio > srcRatio) {
-      renderedH = rect.height;
-      renderedW = rect.height * srcRatio;
-      offsetX = (rect.width - renderedW) / 2;
-      offsetY = 0;
-    } else {
-      renderedW = rect.width;
-      renderedH = rect.width / srcRatio;
-      offsetX = 0;
-      offsetY = (rect.height - renderedH) / 2;
-    }
+  // Convert mouse-event CSS coords → fractional coords (0-1) of the source frame.
+  const cssToFraction = useCallback((cssX, cssY) => {
+    const box = getRenderedBox();
+    if (!box) return { x: 0, y: 0 };
+    const localX = cssX - box.rect.left - box.offsetX;
+    const localY = cssY - box.rect.top - box.offsetY;
     return {
-      left: offsetX + (region.x / srcW) * renderedW,
-      top: offsetY + (region.y / srcH) * renderedH,
-      width: (region.w / srcW) * renderedW,
-      height: (region.h / srcH) * renderedH,
+      x: Math.max(0, Math.min(1, localX / box.renderedW)),
+      y: Math.max(0, Math.min(1, localY / box.renderedH)),
     };
-  }, []);
+  }, [getRenderedBox]);
+
+  // Convert a fractional region → CSS pixel rect for drawing the overlay.
+  const fractionToCss = useCallback((region) => {
+    if (!region) return null;
+    const box = getRenderedBox();
+    if (!box) return null;
+    return {
+      left: box.offsetX + region.x * box.renderedW,
+      top: box.offsetY + region.y * box.renderedH,
+      width: region.w * box.renderedW,
+      height: region.h * box.renderedH,
+    };
+  }, [getRenderedBox]);
 
   const handlePointerDown = (e) => {
     if (!isActive()) return;
@@ -133,13 +124,14 @@ const CalibrationOverlay = ({ initialRegions, onSave, onCancel }) => {
   };
   const handlePointerUp = (e) => {
     if (!drag) return;
-    const a = cssToSource(drag.startCss.x, drag.startCss.y);
-    const b = cssToSource(e.clientX, e.clientY);
+    const a = cssToFraction(drag.startCss.x, drag.startCss.y);
+    const b = cssToFraction(e.clientX, e.clientY);
     const rect = normalizeRect(a, b);
     setDrag(null);
-    if (rect.w < 8 || rect.h < 8) return; // treat as accidental click
+    // Reject tiny rects (treat as accidental click). Threshold is fractional —
+    // 0.5% of the source's smaller dimension.
+    if (rect.w < 0.005 || rect.h < 0.005) return;
     setRegions(r => ({ ...r, [activeKey]: rect }));
-    // Auto-advance to next unset region
     const nextUnset = REGION_LIST.find(r => r.key !== activeKey && !regions[r.key]);
     if (nextUnset) setActiveKey(nextUnset.key);
   };
@@ -217,7 +209,7 @@ const CalibrationOverlay = ({ initialRegions, onSave, onCancel }) => {
             {REGION_LIST.map(r => {
               const region = regions[r.key];
               if (!region) return null;
-              const css = sourceToCss(region);
+              const css = fractionToCss(region);
               if (!css) return null;
               return (
                 <div

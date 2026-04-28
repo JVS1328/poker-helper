@@ -110,7 +110,17 @@ const loadPersisted = () => {
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Drop pre-fractional regions: any value > 1 means it was stored in raw
+    // pixels. Fractional regions are always in [0, 1].
+    if (parsed?.regions) {
+      const looksLegacy = REGION_KEYS.some(k => {
+        const r = parsed.regions[k];
+        return r && (r.x > 1 || r.y > 1 || r.w > 1 || r.h > 1);
+      });
+      if (looksLegacy) parsed.regions = null;
+    }
+    return parsed;
   } catch {
     return null;
   }

@@ -2,6 +2,11 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { PokerLogic, parseCard } from '../poker-logic';
 import CardPickerGrid from './CardPickerGrid';
 import CardSlot from './CardSlot';
+import {
+  startCapture, stopCapture, isActive as isCaptureActive,
+  captureFullFrame, subscribe as subscribeCapture,
+} from '../screen-capture';
+import { readTableState, CONFIDENCE_THRESHOLD } from '../vlm-client';
 
 const pokerLogic = new PokerLogic();
 
@@ -61,6 +66,44 @@ const BUCKET_COLOR = {
   blind: 'text-rose-700 bg-rose-100',
 };
 
+const formatAgo = (ts) => {
+  if (!ts) return '';
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+};
+
+const ScreenReadStatus = ({ reading, lastRead, ready }) => {
+  let bg, color, label, title;
+  if (reading) {
+    bg = 'bg-blue-100'; color = 'text-blue-800'; label = 'Reading…'; title = '';
+  } else if (lastRead?.error) {
+    bg = 'bg-red-100'; color = 'text-red-800'; label = `Error · ${formatAgo(lastRead.at)}`;
+    title = lastRead.error;
+  } else if (lastRead) {
+    bg = lastRead.ok ? 'bg-emerald-100' : 'bg-amber-100';
+    color = lastRead.ok ? 'text-emerald-800' : 'text-amber-800';
+    label = `Read ${formatAgo(lastRead.at)}`;
+    const lines = [];
+    if (lastRead.applied?.length) lines.push('Applied: ' + lastRead.applied.join(', '));
+    if (lastRead.skipped?.length) lines.push('Skipped: ' + lastRead.skipped.join(', '));
+    title = lines.join('\n') || 'Nothing applied.';
+  } else if (ready) {
+    bg = 'bg-gray-100'; color = 'text-gray-700'; label = 'Ready · press space'; title = '';
+  } else {
+    bg = 'bg-gray-100'; color = 'text-gray-500'; label = 'Idle'; title = 'Set API key + calibrate to enable';
+  }
+  return (
+    <span
+      className={`px-2 py-1 rounded text-xs font-medium ${bg} ${color} whitespace-nowrap`}
+      title={title}
+    >
+      {label}
+    </span>
+  );
+};
+
 const loadPersisted = () => {
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
@@ -87,6 +130,16 @@ const PokerUI = () => {
   const [pickerSlot, setPickerSlot] = useState(null);
   const [showPositionHelp, setShowPositionHelp] = useState(false);
 
+  // Screen-read feature state
+  const [screenReadEnabled, setScreenReadEnabled] = useState(persisted?.screenReadEnabled ?? false);
+  const [apiKey, setApiKey] = useState(persisted?.apiKey ?? '');
+  const [captureActive, setCaptureActive] = useState(isCaptureActive());
+  const [reading, setReading] = useState(false);
+  const [lastRead, setLastRead] = useState(null); // { at, ok, applied:[], skipped:[], error? }
+
+  // Mirror live capture state into React
+  useEffect(() => subscribeCapture(() => setCaptureActive(isCaptureActive())), []);
+
   // Clamp seatIndex when numPlayers shrinks
   useEffect(() => {
     if (seatIndex >= numPlayers) setSeatIndex(numPlayers - 1);
@@ -101,10 +154,13 @@ const PokerUI = () => {
     try {
       localStorage.setItem(
         PERSIST_KEY,
-        JSON.stringify({ numPlayers, seatIndex, stackSize, bigBlind, rotateForward })
+        JSON.stringify({
+          numPlayers, seatIndex, stackSize, bigBlind, rotateForward,
+          screenReadEnabled, apiKey,
+        })
       );
     } catch { /* ignore */ }
-  }, [numPlayers, seatIndex, stackSize, bigBlind, rotateForward]);
+  }, [numPlayers, seatIndex, stackSize, bigBlind, rotateForward, screenReadEnabled, apiKey]);
 
   const allUsedCards = useMemo(
     () => [...holeCards, ...communityCards.slice(0, revealedStreets)].filter(Boolean),
@@ -190,9 +246,98 @@ const PokerUI = () => {
   const dealTurn = useCallback(() => { if (revealedStreets === 3) setRevealedStreets(4); }, [revealedStreets]);
   const dealRiver = useCallback(() => { if (revealedStreets === 4) setRevealedStreets(5); }, [revealedStreets]);
 
+  // ---- Screen-read pipeline ----
+  const handleStartCapture = useCallback(async () => {
+    try {
+      await startCapture();
+      setLastRead(prev => prev?.error ? null : prev);
+    } catch (err) {
+      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: err.message || String(err) });
+    }
+  }, []);
+
+  const readScreen = useCallback(async () => {
+    if (reading) return;
+    if (!apiKey) {
+      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: 'API key not set.' });
+      return;
+    }
+    if (!isCaptureActive()) {
+      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: 'Screen capture not running. Click Start capture.' });
+      return;
+    }
+
+    setReading(true);
+    try {
+      const image = captureFullFrame();
+      const r = await readTableState(image, { apiKey });
+      const applied = [];
+      const skipped = [];
+
+      // Hole cards — require exactly 2.
+      if (r.holeCards.confidence >= CONFIDENCE_THRESHOLD && r.holeCards.cards.length === 2) {
+        setHoleCards([r.holeCards.cards[0], r.holeCards.cards[1]]);
+        applied.push(`hole (${r.holeCards.cards.join(' ')})`);
+      } else {
+        skipped.push(`hole (conf ${r.holeCards.confidence.toFixed(2)}, ${r.holeCards.cards.length} cards)`);
+      }
+
+      // Board — accept 0, 3, 4, or 5 (poker-legal counts).
+      const boardLen = r.board.cards.length;
+      if (r.board.confidence >= CONFIDENCE_THRESHOLD && (boardLen === 0 || boardLen === 3 || boardLen === 4 || boardLen === 5)) {
+        const padded = [...r.board.cards, '', '', '', '', ''].slice(0, 5);
+        setCommunityCards(padded);
+        setRevealedStreets(boardLen);
+        applied.push(`board (${boardLen}: ${r.board.cards.join(' ') || '—'})`);
+      } else {
+        skipped.push(`board (conf ${r.board.confidence.toFixed(2)}, ${boardLen} cards)`);
+      }
+
+      // Pot
+      if (r.pot.confidence >= CONFIDENCE_THRESHOLD && typeof r.pot.amount === 'number') {
+        setPotSize(Math.round(r.pot.amount));
+        applied.push(`pot ($${Math.round(r.pot.amount)})`);
+      } else {
+        skipped.push(`pot (conf ${r.pot.confidence.toFixed(2)})`);
+      }
+
+      // To call
+      if (r.toCall.confidence >= CONFIDENCE_THRESHOLD && typeof r.toCall.amount === 'number') {
+        setCurrentBet(Math.round(r.toCall.amount));
+        applied.push(`to call ($${Math.round(r.toCall.amount)})`);
+      } else {
+        skipped.push(`to call (conf ${r.toCall.confidence.toFixed(2)})`);
+      }
+
+      // Stack
+      if (r.stack.confidence >= CONFIDENCE_THRESHOLD && typeof r.stack.amount === 'number') {
+        setStackSize(Math.round(r.stack.amount));
+        applied.push(`stack ($${Math.round(r.stack.amount)})`);
+      } else {
+        skipped.push(`stack (conf ${r.stack.confidence.toFixed(2)})`);
+      }
+
+      setLastRead({ at: Date.now(), ok: applied.length > 0, applied, skipped, notes: r.notes });
+    } catch (err) {
+      setLastRead({ at: Date.now(), ok: false, applied: [], skipped: [], error: err.message || String(err) });
+    } finally {
+      setReading(false);
+    }
+  }, [reading, apiKey]);
+
+  const screenReadReady = screenReadEnabled && captureActive && apiKey;
+
+  // Tick once a second so the "Read Xs ago" label updates without a manual refresh.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!lastRead) return undefined;
+    const id = setInterval(() => setNowTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [lastRead]);
+
   // Refs so the keydown handler doesn't re-bind every render
-  const refs = useRef({ newHand, dealFlop, dealTurn, dealRiver, callBet, wonHand });
-  useEffect(() => { refs.current = { newHand, dealFlop, dealTurn, dealRiver, callBet, wonHand }; });
+  const refs = useRef({ newHand, dealFlop, dealTurn, dealRiver, callBet, wonHand, readScreen });
+  useEffect(() => { refs.current = { newHand, dealFlop, dealTurn, dealRiver, callBet, wonHand, readScreen }; });
 
   useEffect(() => {
     const handleKey = (e) => {
@@ -200,7 +345,12 @@ const PokerUI = () => {
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      switch (e.key.toLowerCase()) {
+      const k = e.key.toLowerCase();
+      if (k === ' ' || e.key === 'Spacebar') {
+        if (screenReadEnabled) { e.preventDefault(); refs.current.readScreen(); }
+        return;
+      }
+      switch (k) {
         case 'n': e.preventDefault(); refs.current.newHand(); break;
         case 'f': e.preventDefault(); refs.current.dealFlop(); break;
         case 't': e.preventDefault(); refs.current.dealTurn(); break;
@@ -212,7 +362,7 @@ const PokerUI = () => {
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [pickerSlot]);
+  }, [pickerSlot, screenReadEnabled]);
 
   const openPicker = (type, index) => setPickerSlot({ type, index });
 
@@ -241,20 +391,78 @@ const PokerUI = () => {
   return (
     <div className="p-4 max-w-5xl mx-auto bg-white shadow-lg rounded-lg">
       <div className="space-y-6">
-        <div className="flex items-center justify-between border-b pb-4">
+        <div className="flex items-start justify-between border-b pb-4 gap-3 flex-wrap">
           <div className="flex items-center space-x-2">
             <span className="text-3xl">🎴</span>
             <h1 className="text-2xl font-bold text-gray-800">Poker Decision Helper</h1>
           </div>
-          <button
-            type="button"
-            onClick={newHand}
-            className="px-3 py-1.5 text-sm bg-gray-100 hover:bg-gray-200 rounded border border-gray-300 text-gray-700"
-            title="New hand — rotates your seat (n)"
-          >
-            New hand <kbd className="ml-1 px-1 py-0.5 bg-white rounded text-xs border">n</kbd>
-          </button>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <label className="flex items-center gap-1.5 text-xs font-medium text-gray-700 px-2 py-1.5 rounded border border-gray-300 bg-gray-50 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={screenReadEnabled}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setScreenReadEnabled(on);
+                  if (!on && captureActive) stopCapture();
+                }}
+              />
+              Screen-read
+            </label>
+            {screenReadEnabled && (
+              <>
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="Anthropic API key"
+                  className="px-2 py-1.5 text-xs border rounded w-40 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                  title="sk-ant-... — stored in localStorage"
+                  autoComplete="off"
+                />
+                {captureActive ? (
+                  <button
+                    type="button"
+                    onClick={stopCapture}
+                    className="px-2 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 rounded border border-gray-300 text-gray-700"
+                    title="Stop screen sharing"
+                  >
+                    Stop capture
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleStartCapture}
+                    className="px-2 py-1.5 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700"
+                    title="Pick the screen / window / tab to share. Pick 'Window' or 'Chrome Tab' so it keeps reading when you alt-tab."
+                  >
+                    Start capture
+                  </button>
+                )}
+                <ScreenReadStatus
+                  reading={reading}
+                  lastRead={lastRead}
+                  ready={screenReadReady}
+                />
+              </>
+            )}
+            <button
+              type="button"
+              onClick={newHand}
+              className="px-3 py-1.5 text-sm bg-gray-100 hover:bg-gray-200 rounded border border-gray-300 text-gray-700"
+              title="New hand — rotates your seat (n)"
+            >
+              New hand <kbd className="ml-1 px-1 py-0.5 bg-white rounded text-xs border">n</kbd>
+            </button>
+          </div>
         </div>
+        {screenReadEnabled && (
+          <div className="-mt-4 text-xs text-gray-500">
+            Press <kbd className="px-1 bg-gray-100 rounded border">space</kbd> to read your hole cards, board, pot, to-call, and stack from the shared screen.
+            {!apiKey && <span className="text-amber-600"> · Paste your API key.</span>}
+            {apiKey && !captureActive && <span className="text-amber-600"> · Click Start capture and pick the poker window.</span>}
+          </div>
+        )}
 
         {/* Decision panel */}
         <div className={`p-4 rounded-lg border-2 ${decision ? decisionColor : 'bg-gray-50 border-gray-200 text-gray-500'}`}>
@@ -495,6 +703,11 @@ const PokerUI = () => {
           <kbd className="px-1 bg-gray-100 rounded border">f</kbd> flop ·{' '}
           <kbd className="px-1 bg-gray-100 rounded border">t</kbd> turn ·{' '}
           <kbd className="px-1 bg-gray-100 rounded border">r</kbd> river ·{' '}
+          {screenReadEnabled && (
+            <>
+              <kbd className="px-1 bg-gray-100 rounded border">space</kbd> read screen ·{' '}
+            </>
+          )}
           in picker, type rank+suit (e.g.{' '}
           <kbd className="px-1 bg-gray-100 rounded border">a</kbd>
           <kbd className="px-1 bg-gray-100 rounded border">h</kbd>{' '}

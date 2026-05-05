@@ -24,6 +24,7 @@ const seatOrderForPlayers = (n) => {
     case 7: return ['BTN', 'SB', 'BB', 'UTG', 'MP', 'HJ', 'CO'];
     case 8: return ['BTN', 'SB', 'BB', 'UTG', 'UTG+1', 'MP', 'HJ', 'CO'];
     case 9: return ['BTN', 'SB', 'BB', 'UTG', 'UTG+1', 'UTG+2', 'MP', 'HJ', 'CO'];
+    case 10: return ['BTN', 'SB', 'BB', 'UTG', 'UTG+1', 'UTG+2', 'UTG+3', 'MP', 'HJ', 'CO'];
     default: return ['BTN', 'SB', 'BB', 'UTG'];
   }
 };
@@ -615,7 +616,7 @@ const PokerUI = () => {
               value={numPlayers}
               onChange={(e) => setNumPlayers(Number(e.target.value))}
               min={2}
-              max={9}
+              max={10}
             />
           </div>
           <div>

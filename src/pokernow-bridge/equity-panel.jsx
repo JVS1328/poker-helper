@@ -7,6 +7,7 @@ import { useDraggable } from './draggable';
 import { storage } from './storage';
 import { getVariant } from './variants';
 import { computeEquity } from './equity-engine';
+import { computeDisplayStats, classifyBucket, subscribeStats } from './stat-tracker';
 
 const COLORS = {
   bg: 'rgba(20, 24, 30, 0.92)',
@@ -39,6 +40,18 @@ export const EquityPanel = ({ snapshot }) => {
   const [collapsed, setCollapsed] = useState(() => storage.get('layout:equity-panel', {}).collapsed || false);
   const [equity, setEquity] = useState(null);
   const [computing, setComputing] = useState(false);
+  const [equityMode, setEquityMode] = useState(() => storage.get('settings:equityMode', 'random'));
+  const [, setStatsTick] = useState(0);
+
+  useEffect(() => subscribeStats(() => setStatsTick(t => t + 1)), []);
+
+  const toggleMode = () => {
+    setEquityMode(m => {
+      const next = m === 'random' ? 'ranges' : 'random';
+      storage.set('settings:equityMode', next);
+      return next;
+    });
+  };
 
   const initial = useMemo(() => {
     const saved = storage.get('layout:equity-panel', {});
@@ -64,6 +77,20 @@ export const EquityPanel = ({ snapshot }) => {
   const holeKey = snapshot.holeCards.join(',');
   const boardKey = snapshot.board.join(',');
 
+  // Build opponent buckets from stats (in poker-order, skipping the hero).
+  const opponentBuckets = useMemo(() => {
+    return snapshot.seats
+      .filter(s => !s.isHero && s.name)
+      .map(s => {
+        const ds = computeDisplayStats(s.name, 5);
+        return ds.stats ? classifyBucket(ds.stats.vpip, ds.hands) : 'unknown';
+      });
+  }, [snapshot.seats.map(s => s.name).join('|'), snapshot.handId]);
+
+  // Only allow range mode when we actually have at least one classified opponent.
+  const hasAnyClassified = opponentBuckets.some(b => b !== 'unknown');
+  const effectiveMode = equityMode === 'ranges' && hasAnyClassified && snapshot.variant === 'nlhe' ? 'ranges' : 'random';
+
   useEffect(() => {
     let cancelled = false;
     if (!variant) { setEquity(null); return; }
@@ -83,6 +110,7 @@ export const EquityPanel = ({ snapshot }) => {
       hole: snapshot.holeCards,
       board: snapshot.board,
       numOpponents,
+      opponentBuckets: effectiveMode === 'ranges' ? opponentBuckets : null,
     }).then(r => {
       if (cancelled) return;
       setEquity(r);
@@ -93,7 +121,7 @@ export const EquityPanel = ({ snapshot }) => {
       setComputing(false);
     });
     return () => { cancelled = true; };
-  }, [snapshot.variant, holeKey, boardKey, numOpponents, variant]);
+  }, [snapshot.variant, holeKey, boardKey, numOpponents, variant, effectiveMode, opponentBuckets.join('|')]);
 
   // Derived numbers
   const pot = snapshot.pot;
@@ -160,21 +188,45 @@ export const EquityPanel = ({ snapshot }) => {
         <span style={{ fontWeight: 600, fontSize: 12, letterSpacing: 0.4 }}>
           🎴 Pokernow Helper · <span style={{ color: COLORS.accent }}>{variantLabel}</span>
         </span>
-        <button
-          type="button"
-          onClick={toggleCollapsed}
-          style={{
-            background: 'transparent',
-            border: 'none',
-            color: COLORS.textDim,
-            cursor: 'pointer',
-            fontSize: 14,
-            padding: '0 4px',
-          }}
-          title={collapsed ? 'Expand' : 'Collapse'}
-        >
-          {collapsed ? '▸' : '▾'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); toggleMode(); }}
+            onPointerDown={(e) => e.stopPropagation()}
+            style={{
+              background: effectiveMode === 'ranges' ? 'rgba(96,165,250,0.2)' : 'transparent',
+              border: `1px solid ${effectiveMode === 'ranges' ? COLORS.accent : COLORS.border}`,
+              color: effectiveMode === 'ranges' ? COLORS.accent : COLORS.textDim,
+              cursor: 'pointer',
+              fontSize: 9,
+              padding: '1px 5px',
+              borderRadius: 3,
+              letterSpacing: 0.5,
+              textTransform: 'uppercase',
+              fontWeight: 600,
+            }}
+            title={equityMode === 'ranges'
+              ? (effectiveMode === 'ranges' ? 'Equity vs estimated ranges — click to switch to vs random' : 'Range mode on but no classified opponents yet — using random')
+              : 'Equity vs random hands — click to switch to vs estimated ranges (requires HUD data)'}
+          >
+            vs {effectiveMode === 'ranges' ? 'rng' : 'rand'}
+          </button>
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: COLORS.textDim,
+              cursor: 'pointer',
+              fontSize: 14,
+              padding: '0 4px',
+            }}
+            title={collapsed ? 'Expand' : 'Collapse'}
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
+        </div>
       </div>
 
       {!collapsed && (
@@ -203,6 +255,9 @@ export const EquityPanel = ({ snapshot }) => {
             <div style={{ marginTop: 4 }}>
               {snapshot.heroPosition && <span>You: {snapshot.heroPosition}</span>}
               {snapshot.numPlayers ? <span> · {snapshot.numPlayers}-handed</span> : null}
+              {effectiveMode === 'ranges' && (
+                <span> · vs {opponentBuckets.map(b => b[0].toUpperCase()).join('')}</span>
+              )}
             </div>
           </div>
         </div>

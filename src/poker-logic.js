@@ -98,7 +98,7 @@ const score5 = (cards) => {
   return encode(HandRank.HIGH_CARD, ...sortedDesc);
 };
 
-const score7 = (cards) => {
+export const score7 = (cards) => {
   if (cards.length === 5) return score5(cards);
   if (cards.length < 5) return 0;
   let best = 0;

@@ -9,6 +9,8 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/JVS1328/poker-helper/main/tampermonkey/pokernow-bridge.user.js
 // @downloadURL  https://raw.githubusercontent.com/JVS1328/poker-helper/main/tampermonkey/pokernow-bridge.user.js
@@ -34,6 +36,18 @@
     },
     delete(key) {
       try { GM_deleteValue(key); } catch (e) { /* ignore */ }
+    },
+    // Cross-tab change subscription. Fires when ANY tab calls GM_setValue
+    // for the matching key. Returns an unsubscribe function.
+    subscribe(key, fn) {
+      try {
+        const id = GM_addValueChangeListener(key, (k, oldValue, newValue, remote) => {
+          fn(k, oldValue, newValue, !!remote);
+        });
+        return () => { try { GM_removeValueChangeListener(id); } catch (e) {} };
+      } catch (e) {
+        return () => {};
+      }
     },
   };
 

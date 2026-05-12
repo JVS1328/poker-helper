@@ -10,6 +10,8 @@ import { PositionBadge } from './position-badge';
 import { subscribe, refresh, getSnapshot } from './state-store';
 import { findTableRoot, setDebug } from './dom-reader';
 import { storage } from './storage';
+import { drainNewEvents } from './action-log-reader';
+import { applyEvent } from './stat-tracker';
 
 const MOUNT_ID = 'pokernow-bridge-root';
 const DEBOUNCE_MS = 200;
@@ -62,11 +64,22 @@ const init = () => {
   // defensive enough to return mostly-empty data on the first frame.
   refresh();
 
-  // Debounced observer.
+  // Debounced observer. Each tick: drain action-log events into stat-tracker,
+  // then refresh state snapshot for the equity / HUD UI.
   let timer = null;
+  const tick = () => {
+    timer = null;
+    try {
+      const events = drainNewEvents();
+      for (const ev of events) applyEvent(ev);
+    } catch (err) {
+      console.error('[pokernow-bridge] event drain failed:', err);
+    }
+    refresh();
+  };
   const schedule = () => {
     if (timer) return;
-    timer = setTimeout(() => { timer = null; refresh(); }, DEBOUNCE_MS);
+    timer = setTimeout(tick, DEBOUNCE_MS);
   };
 
   const observerTarget = findTableRoot();
@@ -83,7 +96,7 @@ const init = () => {
 
   // Periodic safety refresh — in case the observer misses something subtle
   // (e.g. canvas-rendered chip animations don't always fire mutations).
-  setInterval(refresh, 2000);
+  setInterval(tick, 2000);
 
   console.info('[pokernow-bridge] initialized ✓');
 };

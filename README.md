@@ -115,9 +115,9 @@ npm run deploy
 
 ---
 
-## Pokernow Bridge (Phase 1)
+## Pokernow Bridge
 
-A Tampermonkey userscript that injects a live equity / pot-odds panel and per-opponent HUD shells onto `pokernow.com/games/*` tables, reusing this repo's equity engine. NLHE only in Phase 1; PLO / PLO5 / Hi-Lo lands later phases (the abstraction is wired in).
+A Tampermonkey userscript that injects a live equity / pot-odds panel, per-opponent HUD shells (VPIP / PFR / 3-bet / AF + player-type bucket coloring + notes), and a range-aware equity mode onto `pokernow.com/games/*` tables. Supports NLHE, PLO, PLO5, PLO Hi/Lo, and PLO5 Hi/Lo.
 
 ### Install
 
@@ -125,15 +125,18 @@ A Tampermonkey userscript that injects a live equity / pot-odds panel and per-op
 2. Open [tampermonkey/pokernow-bridge.user.js](tampermonkey/pokernow-bridge.user.js) on GitHub and click the **Raw** button — Tampermonkey prompts to install.
 3. Open any Pokernow game (`https://www.pokernow.com/games/<id>`). The helper appears in the upper-left as a draggable panel; per-opponent HUD shells anchor to each seat.
 
-### What you get in Phase 1
+### What you get
 
 - **Live equity %** — Monte Carlo, updates as community cards appear, colored green when you beat pot odds and red when you don't.
 - **Pot odds** — the call-vs-pot price you need to beat.
 - **EV of call** — expected chips won/lost on calling.
 - **SPR** — stack-to-pot ratio.
-- **Position badge** — BTN / SB / BB / UTG / etc., color-coded by position bucket, anchored over your seat.
-- **HUD shells** — per-opponent boxes with placeholder VPIP / PFR / 3B / AF rows (Phase 2 fills them).
-- **Drag-to-position + persistent layout** — drag the panel header or any HUD shell; positions persist via Tampermonkey storage.
+- **Range-aware equity (`vs rng` toggle)** — once you've played enough hands with the table for the HUD to classify opponents, switch the equity panel to compute equity against each opponent's *estimated range* (Whale 70% / Loose 45% / Average 28% / TAG 18% / Nit 8%). Matches the methodology Equibrah documents on their "How equity works" page.
+- **Position badge** — BTN / SB / BB / UTG / etc., color-coded, anchored over your seat.
+- **HUD shells** — per-opponent boxes showing live VPIP / PFR / 3-bet / AF / hand count, color-tinted by player bucket (Whale pink / Loose amber / TAG blue / Nit emerald). Click the player's name to add or edit a personal note.
+- **Multi-table sync** — stats persist across all your Pokernow tabs via Tampermonkey storage with cross-tab change listeners; an opponent playing at multiple of your tables aggregates into one profile in real-time.
+- **Variants** — NLHE (browser-side Monte Carlo, ~1200 iters), PLO and PLO5 (high), PLO Hi/Lo and PLO5 Hi/Lo (8-or-better split-pot logic). PLO variants run fewer iterations because of the larger combination space — no server-side fallback (project constraint).
+- **Drag-to-position + persistent layout** — drag the panel header or any HUD shell; positions persist.
 
 ### Debug
 
@@ -143,15 +146,15 @@ window.__pokernowBridgeDebug = true;
 ```
 then reload — every DOM selector miss logs to the console. Useful if Pokernow's markup changes and a field stops reading.
 
-### Phased roadmap
+### Phase status
 
-| Phase | Feature |
-|---|---|
-| **1** *(this release)* | DOM reader, equity / pot-odds panel, HUD shells, position badge, variant abstraction (NLHE impl only) |
-| 2 | Opponent action tracking via `/games/<id>/log` poller → VPIP / PFR / AF / 3-bet / W$SD / etc. populated in shells; player notes; color-coded buckets |
-| 3 | Equity vs. **estimated range per opponent** using HUD-stat-driven Whale/Loose/Average/TAG/Nit buckets (Equibrah's defining behavior) |
-| 4 | Multi-table aggregation |
-| 5 | PLO / PLO5 / PLO Hi-Lo / PLO5 Hi-Lo evaluators |
+| Phase | Feature | Status |
+|---|---|---|
+| 1 | DOM reader, equity / pot-odds panel, HUD shells, position badge, variant abstraction | ✅ done |
+| 2 | Opponent action tracking via on-page action log → VPIP / PFR / 3-bet / fold-to-3bet / c-bet / fold-to-cbet / AF / WTSD / W$SD / limps in shells; player notes; bucket coloring | ✅ done |
+| 3 | Equity vs. **estimated range per opponent** using HUD-stat-driven Whale/Loose/Average/TAG/Nit buckets | ✅ done |
+| 4 | Multi-table aggregation (cross-tab listener on opponent profiles) | ✅ done |
+| 5 | PLO / PLO5 / PLO Hi-Lo / PLO5 Hi-Lo evaluators | ✅ done |
 
 Explicit non-goals: hand history / replayer, LLM "AI coach" features, cloud sync.
 

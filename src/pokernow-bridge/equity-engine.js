@@ -2,8 +2,13 @@
 // caller fire requests freely — we coalesce so only the latest request's
 // result is delivered, and we use queueMicrotask + setTimeout(0) to yield
 // to the browser so the UI doesn't jank during the simulation.
+//
+// Two modes:
+//   - 'random'  → opponents dealt fully random hands (Phase 1 behavior)
+//   - 'ranges'  → each opponent dealt from a bucket-derived range (Phase 3)
 
 import { getVariant } from './variants';
+import { calculateRangeEquity } from './equity-vs-range';
 
 let nextId = 0;
 let inflightId = null;
@@ -56,7 +61,13 @@ const runBatched = (variant, opts, onProgress) => new Promise((resolve, reject) 
 
 // Returns the latest equity computation result, or null if this request was
 // superseded by a newer one or inputs are invalid.
-export const computeEquity = async ({ variantId, hole, board, numOpponents }) => {
+export const computeEquity = async ({
+  variantId,
+  hole,
+  board,
+  numOpponents,
+  opponentBuckets,   // optional — if provided, switches to range-aware mode
+}) => {
   const variant = getVariant(variantId);
   if (!variant || !variant.supportsEquity) {
     return { equity: null, reason: 'variant-not-implemented', variantId };
@@ -66,7 +77,19 @@ export const computeEquity = async ({ variantId, hole, board, numOpponents }) =>
 
   const myId = ++nextId;
   inflightId = myId;
-  const result = await runBatched(variant, { hole, board, numOpponents });
-  if (inflightId !== myId) return null; // a newer request raced us — drop
+
+  let result;
+  if (opponentBuckets && variantId === 'nlhe') {
+    // Range-aware path: yield once, run synchronously inside (it's already
+    // ~1000 iters which we keep below ~150ms on a modern laptop in NLHE).
+    await new Promise(r => setTimeout(r, 0));
+    result = calculateRangeEquity({ hole, board, opponentBuckets });
+    if (result) result.mode = 'ranges';
+  } else {
+    result = await runBatched(variant, { hole, board, numOpponents });
+    if (result) result.mode = 'random';
+  }
+
+  if (inflightId !== myId) return null;
   return result;
 };

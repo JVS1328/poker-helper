@@ -1,15 +1,18 @@
-// Variant registry. Phase 1 ships NLHE; Phase 5 adds concrete PLO etc.
+// Variant registry. All variants are implemented (Phase 5 done).
 // Keys match the normalized variant ID the DOM reader emits.
 
 import nlhe from './nlhe';
-import { makeStub } from './not-yet-supported';
+import plo from './plo';
+import plo5 from './plo5';
+import ploHiLo from './plo-hi-lo';
+import plo5HiLo from './plo5-hi-lo';
 
 export const VARIANTS = {
   nlhe,
-  plo:         makeStub('plo',         'PLO',          4, false),
-  'plo-hi-lo': makeStub('plo-hi-lo',   'PLO Hi/Lo',    4, true),
-  plo5:        makeStub('plo5',        'PLO5',         5, false),
-  'plo5-hi-lo':makeStub('plo5-hi-lo',  'PLO5 Hi/Lo',   5, true),
+  plo,
+  'plo-hi-lo': ploHiLo,
+  plo5,
+  'plo5-hi-lo': plo5HiLo,
 };
 
 export const DEFAULT_VARIANT_ID = 'nlhe';

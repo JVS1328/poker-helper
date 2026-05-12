@@ -17,6 +17,7 @@ In (Phase 1):
 - Floating, draggable equity / pot-odds panel showing: equity %, pot odds, required equity to call, SPR, EV of call.
 - Per-opponent HUD overlay **shells** anchored to each seat — drag-positionable, resizable, persisted layout. No stats inside yet (placeholders only).
 - Hero badge anchored to the user's own seat showing position name (BTN / SB / etc.).
+- **Variant abstraction** (interface + registry) wired into the equity engine so adding PLO / PLO5 / Hi-Lo later is a plug-in. Only the NLHE implementation actually ships in Phase 1.
 
 Out (Phase 1, deferred to later phases):
 - VPIP / PFR / 3-bet / AF / fold-to-3bet / W$SD / WTSD / etc. — Phase 2.
@@ -24,6 +25,7 @@ Out (Phase 1, deferred to later phases):
 - Color-coded player types, manual notes — Phase 2.
 - Range estimation, equity-vs-range — Phase 3.
 - Multi-table aggregation — Phase 4.
+- PLO / PLO5 / PLO Hi-Lo / PLO5 Hi-Lo *implementations* — Phase 5 (the abstraction lands in Phase 1; each variant ships as its own evaluator drop-in later).
 
 Out permanently (explicit non-goals per user):
 - Hand history storage / saved hands / replayer.
@@ -162,7 +164,9 @@ Note on purity: the store holds DOM references (`seats[i].domEl`) so HUD shells 
 Floating draggable panel. Defaults to top-right of viewport. Position persisted in GM storage.
 
 Shows:
-- **Equity %** — Monte Carlo from current hole cards vs. (numPlayers − 1) random opponents on the current board. Reuses the math in `src/poker-logic.js`. Computed in a Web Worker (see Phase 1 implementation notes) so it doesn't jank the page during 1000+ iterations.
+- **Equity %** — Monte Carlo from current hole cards vs. (numPlayers − 1) **random** opponents on the current board. Reuses the math in `src/poker-logic.js`. Computed in a Web Worker (see Phase 1 implementation notes) so it doesn't jank the page during 1000+ iterations.
+
+  *Phase 1 limitation, by design:* equity is vs. random hands because HUD stats don't exist yet. Phase 3 upgrades the same panel to equity vs. **estimated ranges per opponent**, driven by HUD-stat-based player classification (see "Player-profile ranges" below). This matches Equibrah's defining behavior — opponents on a nit's 8% range produce very different equity than opponents on a whale's 70% range.
 - **Pot odds** — `toCall / (pot + toCall)`. Displayed as a %.
 - **Required equity** — same as pot odds, just relabeled in the "vs. call" framing.
 - **SPR** — `effectiveStack / pot` where effective = min(hero stack, largest other stack). Phase 1 simplification: use `hero stack / pot` until Phase 2 reads opponent stacks reliably.
@@ -233,3 +237,53 @@ Phase 1 deliberately leaves these seams so Phase 2 is purely additive:
 - HUD shells render a 4-row stat grid that's empty in Phase 1; Phase 2 fills rows by name.
 - The storage namespace `pokernow-bridge:opponents:*` is reserved.
 - A new module `src/pokernow-bridge/log-poller.js` is anticipated for Phase 2 to poll `/games/<id>/log` for authoritative action data.
+
+## Variant abstraction (Phase 1 implements NLHE; interface lands now)
+
+Equibrah supports NLHE, PLO, PLO Hi/Lo, PLO5, PLO5 Hi/Lo. The Pokernow `/games/<id>` page declares the variant in its header. Phase 1 reads that string and routes the equity calc through a registry — Phase 5 will add concrete PLO/PLO5/Hi-Lo evaluators without touching the panel, store, or DOM reader.
+
+```js
+// src/pokernow-bridge/variants/index.js
+export const VARIANTS = {
+  'nlhe':       require('./nlhe'),        // ships in Phase 1
+  'plo':        require('./not-yet-supported'),  // Phase 5
+  'plo-hi-lo':  require('./not-yet-supported'),
+  'plo5':       require('./not-yet-supported'),
+  'plo5-hi-lo': require('./not-yet-supported'),
+};
+
+// Each variant module exports the same interface:
+export interface Variant {
+  id: string;                              // 'nlhe' | 'plo' | ...
+  label: string;                           // human-readable, for the panel
+  holeCardCount: number;                   // 2 (NLHE), 4 (PLO), 5 (PLO5)
+  isSplitPot: boolean;                     // true for Hi-Lo variants
+  evaluate7(cards: Card[]): HandValue;     // best 5 from 7 (NLHE)
+  // OR, for PLO-family:
+  evaluateWithHoleConstraint(hole: Card[], board: Card[]): HandValue;
+  // For Hi-Lo: returns { high: HandValue, low: HandValue | null }
+  monteCarloEquity(hole, board, opponentRanges, iterations): EquityResult;
+}
+```
+
+DOM reader returns `variant: 'nlhe' | 'plo' | ...` as a string field on the snapshot. The equity panel shows `"Variant not yet supported"` for non-NLHE in Phase 1, with the rest of the bridge (HUD shells, position badge, panel layout) still functioning.
+
+The `not-yet-supported` module is a stub that satisfies the interface but returns `{ equity: null, reason: 'variant-not-implemented' }`. This keeps the equity panel's render path uniform — no special-casing for non-NLHE.
+
+NLHE's evaluator is the existing `src/poker-logic.js` code wrapped to match the `Variant` interface — no rewrite needed.
+
+## Player-profile ranges (Phase 3 reference, frozen for forward-compatibility)
+
+Phase 3 upgrades the equity panel from equity-vs-random to equity-vs-estimated-range. Each opponent is classified into one of five buckets based on Phase 2's HUD stats, and the Monte Carlo deals each opponent a random hand from a top-percentile range matching their bucket. Bucket boundaries follow Equibrah's published values so users coming from Equibrah see comparable numbers:
+
+| Bucket  | Range % | Trigger (rough, Phase 3 refines) |
+|---------|---------|----------------------------------|
+| Whale   | 70%     | VPIP ≥ 55                        |
+| Loose   | 45%     | 35 ≤ VPIP < 55                   |
+| Average | 28%     | 22 ≤ VPIP < 35                   |
+| TAG     | 18%     | 14 ≤ VPIP < 22                   |
+| Nit     | 8%      | VPIP < 14                        |
+
+Until each opponent has a confidence-worthy sample size (e.g. ≥ 30 hands), Phase 3 falls back to "Average" — same as a fresh player at the table.
+
+Card ranking for "top X% of hands" uses the standard preflop Sklansky-ish ordering (cached in a lookup table at build time). The bucket → range mapping lives in `src/pokernow-bridge/range-buckets.js` in Phase 3.

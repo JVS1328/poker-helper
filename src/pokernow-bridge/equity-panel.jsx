@@ -91,9 +91,12 @@ export const EquityPanel = ({ snapshot }) => {
       });
   }, [snapshot.seats.map(s => `${s.name}:${s.isFolded ? 'F' : 'L'}`).join('|'), snapshot.handId]);
 
-  // Only allow range mode when we actually have at least one classified opponent.
-  const hasAnyClassified = opponentBuckets.some(b => b !== 'unknown');
-  const effectiveMode = equityMode === 'ranges' && hasAnyClassified && snapshot.variant === 'nlhe' ? 'ranges' : 'random';
+  // Range mode works as long as variant is NLHE. With no HUD data, each
+  // opponent defaults to the 'unknown' bucket (40% range — a sensible
+  // mid-loose default that's still more honest than vs-random's effectively-
+  // 100% range). As HUD data accumulates, individual opponents get tighter
+  // or wider ranges based on their actual VPIP.
+  const effectiveMode = equityMode === 'ranges' && snapshot.variant === 'nlhe' ? 'ranges' : 'random';
 
   useEffect(() => {
     let cancelled = false;
@@ -156,10 +159,12 @@ export const EquityPanel = ({ snapshot }) => {
   const variantLabel = variant?.label || 'Unknown';
   const variantSupported = variant?.supportsEquity;
 
-  // Decision recommendation — reuses the same engine the standalone React app
-  // uses. NLHE only; only shown when it's hero's actual turn to act (action
-  // buttons visible). Otherwise the engine misreads "no call button" as "no
-  // bet to call → value-bet anything" and produces nonsense raises.
+  // Decision recommendation — reuses the standalone React app's engine. NLHE
+  // only; only shown when it's hero's actual turn to act (action buttons
+  // visible). Postflop decisions are fed the SAME equity number displayed in
+  // the panel — when range mode is active, that's vs-estimated-ranges, so the
+  // recommendation tightens up vs vs-random (which systematically overrates
+  // marginal hands because real opponents who continue aren't random).
   const decision = useMemo(() => {
     if (snapshot.variant !== 'nlhe') return null;
     if (snapshot.heroFolded) return null;
@@ -174,12 +179,38 @@ export const EquityPanel = ({ snapshot }) => {
     const call = snapshot.toCall ?? 0;
     const stack = snapshot.heroStack ?? 0;
     const bb = snapshot.bigBlind ?? 2;
+
+    // Preflop uses range tables, not equity — safe to call getDecision (it
+    // computes its own equity but ignores it for the preflop branch).
+    if (parsedBoard.length === 0) {
+      try {
+        return pokerLogic.getDecision(parsedHole, parsedBoard, snapshot.heroPosition, numForDecision, pot, call, stack, bb);
+      } catch (e) { return null; }
+    }
+
+    // Postflop: feed in our pre-computed equity (range-aware when toggle is on).
+    // If our equity isn't ready yet, fall back to letting the engine compute
+    // its own vs-random equity so we don't show "no recommendation" mid-tick.
+    if (equity && equity.equity != null) {
+      try {
+        return pokerLogic.getDecisionFromEquity(
+          parsedHole, parsedBoard, snapshot.heroPosition, numForDecision, pot, call, stack, bb,
+          { equity: equity.equity, iterations: equity.iterations || 1000 }
+        );
+      } catch (e) { return null; }
+    }
     try {
       return pokerLogic.getDecision(parsedHole, parsedBoard, snapshot.heroPosition, numForDecision, pot, call, stack, bb);
     } catch (e) {
       return null;
     }
-  }, [snapshot.variant, holeKey, boardKey, snapshot.heroPosition, snapshot.numInHand, snapshot.numPlayers, snapshot.pot, snapshot.toCall, snapshot.heroStack, snapshot.bigBlind, snapshot.heroFolded, snapshot.heroToAct]);
+  }, [
+    snapshot.variant, holeKey, boardKey, snapshot.heroPosition,
+    snapshot.numInHand, snapshot.numPlayers, snapshot.pot, snapshot.toCall,
+    snapshot.heroStack, snapshot.bigBlind, snapshot.heroFolded, snapshot.heroToAct,
+    // Recompute when equity changes (mode flip, range bucket change, new card).
+    equity?.equity, equity?.mode,
+  ]);
 
   const actionColors = {
     Fold:  { bg: 'rgba(248, 113, 113, 0.15)', border: COLORS.bad,    label: COLORS.bad },
@@ -292,6 +323,16 @@ export const EquityPanel = ({ snapshot }) => {
                 {decision.amount > 0 && (
                   <span style={{ fontSize: 18, fontWeight: 600, color: COLORS.text, fontVariantNumeric: 'tabular-nums' }}>
                     {fmtChips(decision.amount)}
+                  </span>
+                )}
+                {effectiveMode === 'ranges' && snapshot.board.length > 0 && (
+                  <span style={{
+                    marginLeft: 'auto', fontSize: 9, color: COLORS.accent,
+                    border: `1px solid ${COLORS.accent}`,
+                    padding: '0 4px', borderRadius: 3,
+                    textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600,
+                  }} title="Recommendation uses equity vs estimated opponent ranges">
+                    rng
                   </span>
                 )}
               </div>

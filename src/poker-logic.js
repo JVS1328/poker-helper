@@ -465,13 +465,18 @@ export class PokerLogic {
   getDecision(holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind = 2) {
     const numOpponents = Math.max(1, numPlayers - 1);
     const equityResult = calculateEquity(holeCards, communityCards, numOpponents);
+    return this.getDecisionFromEquity(holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult);
+  }
 
+  // Same as getDecision but accepts a pre-computed equityResult instead of
+  // running its own Monte Carlo. Lets the Pokernow bridge feed in
+  // equity-vs-estimated-ranges (Phase 3) so postflop recommendations use
+  // contextually accurate equity instead of vs-random.
+  getDecisionFromEquity(holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult) {
     const ctx = { holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult };
-
     const base = communityCards.length === 0
       ? getPreflopDecision(ctx)
       : getPostflopDecision(ctx);
-
     return { ...base, equity: equityResult.equity, equityIterations: equityResult.iterations };
   }
 }

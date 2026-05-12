@@ -110,3 +110,49 @@ Configured for GitHub Pages:
 ```bash
 npm run deploy
 ```
+
+`npm run deploy` runs both `npm run build` (React app) and `npm run build:bridge` (Pokernow userscript bundle) before publishing, so the userscript at `tampermonkey/pokernow-bridge.user.js` always loads the latest matching bundle from `JVS1328.github.io/poker-helper/pokernow-bridge/bundle.js`.
+
+---
+
+## Pokernow Bridge (Phase 1)
+
+A Tampermonkey userscript that injects a live equity / pot-odds panel and per-opponent HUD shells onto `pokernow.com/games/*` tables, reusing this repo's equity engine. NLHE only in Phase 1; PLO / PLO5 / Hi-Lo lands later phases (the abstraction is wired in).
+
+### Install
+
+1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser.
+2. Open [tampermonkey/pokernow-bridge.user.js](tampermonkey/pokernow-bridge.user.js) on GitHub and click the **Raw** button — Tampermonkey prompts to install.
+3. Open any Pokernow game (`https://www.pokernow.com/games/<id>`). The helper appears in the upper-left as a draggable panel; per-opponent HUD shells anchor to each seat.
+
+### What you get in Phase 1
+
+- **Live equity %** — Monte Carlo, updates as community cards appear, colored green when you beat pot odds and red when you don't.
+- **Pot odds** — the call-vs-pot price you need to beat.
+- **EV of call** — expected chips won/lost on calling.
+- **SPR** — stack-to-pot ratio.
+- **Position badge** — BTN / SB / BB / UTG / etc., color-coded by position bucket, anchored over your seat.
+- **HUD shells** — per-opponent boxes with placeholder VPIP / PFR / 3B / AF rows (Phase 2 fills them).
+- **Drag-to-position + persistent layout** — drag the panel header or any HUD shell; positions persist via Tampermonkey storage.
+
+### Debug
+
+In the browser console:
+```js
+window.__pokernowBridgeDebug = true;
+```
+then reload — every DOM selector miss logs to the console. Useful if Pokernow's markup changes and a field stops reading.
+
+### Phased roadmap
+
+| Phase | Feature |
+|---|---|
+| **1** *(this release)* | DOM reader, equity / pot-odds panel, HUD shells, position badge, variant abstraction (NLHE impl only) |
+| 2 | Opponent action tracking via `/games/<id>/log` poller → VPIP / PFR / AF / 3-bet / W$SD / etc. populated in shells; player notes; color-coded buckets |
+| 3 | Equity vs. **estimated range per opponent** using HUD-stat-driven Whale/Loose/Average/TAG/Nit buckets (Equibrah's defining behavior) |
+| 4 | Multi-table aggregation |
+| 5 | PLO / PLO5 / PLO Hi-Lo / PLO5 Hi-Lo evaluators |
+
+Explicit non-goals: hand history / replayer, LLM "AI coach" features, cloud sync.
+
+See [docs/superpowers/specs/2026-05-11-pokernow-bridge-phase1-design.md](docs/superpowers/specs/2026-05-11-pokernow-bridge-phase1-design.md) for the full design.

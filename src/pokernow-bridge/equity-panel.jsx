@@ -130,38 +130,6 @@ export const EquityPanel = ({ snapshot }) => {
     return () => { cancelled = true; };
   }, [snapshot.variant, holeKey, boardKey, numOpponents, variant, effectiveMode, opponentBuckets.join('|')]);
 
-  // Derived numbers
-  const pot = snapshot.pot;
-  const toCall = snapshot.toCall;
-  const stack = snapshot.heroStack;
-
-  const potOdds = (pot != null && toCall != null && toCall > 0)
-    ? toCall / (pot + toCall)
-    : null;
-
-  const eq = equity?.equity ?? null;
-  const ev = (eq != null && pot != null && toCall != null)
-    ? eq * (pot + toCall) - (1 - eq) * toCall
-    : null;
-
-  // SPR uses the effective stack (min of hero and deepest opponent), matching
-  // what the decision engine sees. Falls back to hero's stack if no opponents.
-  const sprStack = (effectiveStack > 0) ? effectiveStack : stack;
-  const spr = (sprStack != null && pot != null && pot > 0)
-    ? sprStack / pot
-    : null;
-
-  // Color the equity number relative to pot odds.
-  let equityColor = COLORS.text;
-  if (eq != null && potOdds != null) {
-    if (eq > potOdds + 0.05) equityColor = COLORS.good;
-    else if (eq < potOdds - 0.05) equityColor = COLORS.bad;
-    else equityColor = COLORS.warn;
-  }
-
-  const variantLabel = variant?.label || 'Unknown';
-  const variantSupported = variant?.supportsEquity;
-
   // Effective stack for SPR — min of hero's stack and the deepest non-folded
   // opponent. SPR using the deeper of the two understates commitment in a
   // way that can mislead postflop decisions.
@@ -189,11 +157,41 @@ export const EquityPanel = ({ snapshot }) => {
   // this street (animations carry chips to the pot). Pot-at-time-of-bet ≈
   // displayed pot − their bet. betSizing = bet / pot_before_bet.
   const betSizing = useMemo(() => {
-    const pot = snapshot.pot;
+    const p = snapshot.pot;
     const bet = snapshot.toCall;
-    if (!pot || !bet || pot <= bet) return null;
-    return bet / (pot - bet);
+    if (!p || !bet || p <= bet) return null;
+    return bet / (p - bet);
   }, [snapshot.pot, snapshot.toCall]);
+
+  // Derived display numbers (depend on effectiveStack defined above).
+  const pot = snapshot.pot;
+  const toCall = snapshot.toCall;
+  const stack = snapshot.heroStack;
+
+  const potOdds = (pot != null && toCall != null && toCall > 0)
+    ? toCall / (pot + toCall)
+    : null;
+
+  const eq = equity?.equity ?? null;
+  const ev = (eq != null && pot != null && toCall != null)
+    ? eq * (pot + toCall) - (1 - eq) * toCall
+    : null;
+
+  const sprStack = (effectiveStack > 0) ? effectiveStack : stack;
+  const spr = (sprStack != null && pot != null && pot > 0)
+    ? sprStack / pot
+    : null;
+
+  // Color the equity number relative to pot odds.
+  let equityColor = COLORS.text;
+  if (eq != null && potOdds != null) {
+    if (eq > potOdds + 0.05) equityColor = COLORS.good;
+    else if (eq < potOdds - 0.05) equityColor = COLORS.bad;
+    else equityColor = COLORS.warn;
+  }
+
+  const variantLabel = variant?.label || 'Unknown';
+  const variantSupported = variant?.supportsEquity;
 
   // Table looseness from HUD buckets — drives stealFriendly / tightenForLAG.
   // Average bucket score over non-hero non-folded opponents. Scale: nit=0,

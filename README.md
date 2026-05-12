@@ -119,11 +119,33 @@ npm run deploy
 
 A Tampermonkey userscript that injects a live equity / pot-odds panel, per-opponent HUD shells (VPIP / PFR / 3-bet / AF + player-type bucket coloring + notes), and a range-aware equity mode onto `pokernow.com/games/*` tables. Supports NLHE, PLO, PLO5, PLO Hi/Lo, and PLO5 Hi/Lo.
 
-### Install
+### Install (production — bundle loaded from GitHub Pages)
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser.
 2. Open [tampermonkey/pokernow-bridge.user.js](tampermonkey/pokernow-bridge.user.js) on GitHub and click the **Raw** button — Tampermonkey prompts to install.
 3. Open any Pokernow game (`https://www.pokernow.com/games/<id>`). The helper appears in the upper-left as a draggable panel; per-opponent HUD shells anchor to each seat.
+
+### Run it locally (no deployment needed)
+
+For testing before pushing — produces a single self-contained `.user.js` file that has the whole bundle inlined. Edit code, rebuild, re-install.
+
+```bash
+npm install                              # if you haven't already
+npm run build:bridge:userscript          # one-shot build
+# or:
+npm run dev:bridge                       # rebuild on save
+```
+
+The output lands at `build/pokernow-bridge/pokernow-bridge.user.js`. To install:
+
+1. Open Tampermonkey's dashboard (icon in toolbar → Dashboard).
+2. Drag the `pokernow-bridge.user.js` file onto the dashboard, **or** click the `+` ("Create a new script") tab → paste the file's contents → save.
+3. Tampermonkey shows the script's metadata block and asks to install — confirm.
+4. Open a Pokernow game. Press F12 to confirm `[pokernow-bridge] initialized ✓` in the console.
+
+After code changes: re-run `npm run build:bridge:userscript` and re-install (Tampermonkey detects the version match and prompts to update). For a faster loop, use `npm run dev:bridge` to keep esbuild watching, then just re-drag the file each rebuild — or use `@require file:///absolute/path/to/bundle.js` if you've enabled "Allow access to file URLs" for Tampermonkey in `chrome://extensions`.
+
+The local userscript is **unminified with inline sourcemaps**, so Pokernow's DevTools step into the original `src/pokernow-bridge/*.jsx` files when you debug.
 
 ### What you get
 

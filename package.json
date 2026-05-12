@@ -19,6 +19,8 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "build:bridge": "esbuild src/pokernow-bridge/index.jsx --bundle --format=iife --target=es2020 --outfile=build/pokernow-bridge/bundle.js --jsx=automatic --loader:.jsx=jsx --define:process.env.NODE_ENV=\\\"production\\\" --minify --sourcemap",
+    "build:bridge:userscript": "node scripts/build-userscript.mjs",
+    "dev:bridge": "node scripts/build-userscript.mjs --watch",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },

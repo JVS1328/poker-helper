@@ -130,6 +130,7 @@ const HudShell = ({ seat, offsets, onCommit, statsVersion }) => {
         pointerEvents: 'auto',
         cursor: editingNote ? 'auto' : 'grab',
         touchAction: 'none',
+        opacity: seat.isFolded ? 0.45 : 1,
       }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -228,6 +229,8 @@ export const HudShells = ({ snapshot }) => {
     });
   }, []);
 
+  // Render a shell for every non-hero seat. Folded opponents still get a shell
+  // (so you can see their stats between hands) but rendered with reduced opacity.
   return (
     <>
       {snapshot.seats

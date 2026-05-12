@@ -12,27 +12,30 @@ const SEL = {
   // Root we observe with MutationObserver
   tableRoot: '.game-main-container, .table-and-chat-container, [class*="game-container"]',
 
-  // Per-seat
+  // Per-seat — Pokernow uses .table-player.table-player-{N} for each seat
   allSeats: '.table-player',
   heroSeat: '.table-player.you-player',
   seatName: '.table-player-name span',
   seatStack: '.table-player-stack .normal-value',
   seatStackFraction: '.table-player-stack .fraction-value',
-  dealerChip: '.dealer-position-img, .dealer-button-ctn',
 
-  // Hero cards
-  heroCardEls: '.table-player.you-player .table-player-cards .card',
+  // Dealer button — sibling of seats, not inside them. Class .dealer-position-{N}
+  // identifies which seat number is the dealer.
+  dealerButton: '.dealer-button-ctn',
 
-  // Community
-  boardCardEls: '.table-cards .card',
+  // Cards live in .card-container elements; the .card element inside is just
+  // the visual face. Face-up cards have class .flipped on the container.
+  heroCardEls: '.table-player.you-player .table-player-cards .card-container',
+  boardCardEls: '.table-cards .card-container',
 
   // Pot
   potLabel: '.table-pot-size .add-on-pot-value, .table-pot-size .normal-value, .table-pot-size .value',
 
-  // Action buttons (hero)
-  callButton: '.game-decisions-ctn .call .amount, .action-buttons .call .value, button.call .amount',
+  // Action buttons live inside .game-decisions-ctn > .action-buttons. The call
+  // button is BUTTON.action-button.call (text contains "Call 400" etc.).
+  callButton: '.game-decisions-ctn .action-buttons button.action-button.call, .game-decisions-ctn .action-buttons button.call, .action-buttons .call',
 
-  // Blinds (table title bar)
+  // Blinds (table title bar) — Pokernow shows two .normal-value spans for SB/BB.
   blindLabel: '.blind-value-ctn .normal-value, .blinds-value, [class*="blind"] .normal-value',
 
   // Variant label (title)
@@ -51,17 +54,12 @@ const $ = (root, sel) => root.querySelector(sel);
 
 // --- Card parsing ---------------------------------------------------------
 
-const SUIT_LETTER_FROM_CLASS = (classList) => {
-  // Pokernow card elements use classes like "card-h", "suit-h", "value-Ah", etc.
-  // We try the most common patterns.
-  for (const cls of classList) {
-    const m = cls.match(/^(?:card|suit)-([hdsc])$/i);
-    if (m) return m[1].toLowerCase();
-    const m2 = cls.match(/value-([2-9TJQKA]|10)([hdsc])$/i);
-    if (m2) return m2[2].toLowerCase();
-  }
-  return null;
-};
+// Pokernow encodes the card on a .card-container element with classes like:
+//   "card-container card-s  card-s-K flipped big"
+//   → card-s     suit = spades
+//   → card-s-K   suit = spades, rank = K
+//   → flipped    card is face-up (visible)
+// When a card is face-down or empty, those rank/suit classes are absent.
 
 const RANK_FROM_TEXT = (text) => {
   if (!text) return null;
@@ -71,24 +69,29 @@ const RANK_FROM_TEXT = (text) => {
   return null;
 };
 
-const readCardEl = (el) => {
-  if (!el) return null;
-  const cls = Array.from(el.classList);
-  // Try class-encoded full value first.
+const readCardEl = (containerEl) => {
+  if (!containerEl) return null;
+  const cls = Array.from(containerEl.classList);
+
+  // Primary path: card-{suit}-{rank} class. Suit comes first, rank second.
   for (const c of cls) {
-    const m = c.match(/^(?:card|value)-([2-9TJQKA]|10)([hdsc])$/i);
+    const m = c.match(/^card-([hdsc])-(10|[2-9TJQKA])$/i);
     if (m) {
-      const rank = RANK_FROM_TEXT(m[1]);
-      const suit = m[2].toLowerCase();
-      if (rank && suit) return normalizeCard(`${rank}${suit}`);
+      const suit = m[1].toLowerCase();
+      const rank = m[2] === '10' ? 'T' : m[2].toUpperCase();
+      return normalizeCard(`${rank}${suit}`);
     }
   }
-  // Otherwise: rank from text content, suit from class.
-  const rankText = el.querySelector?.('.rank, .value, [class*="rank"]')?.textContent
-    ?? el.textContent;
-  const rank = RANK_FROM_TEXT(rankText?.replace(/[^\d10TJQKA]/gi, ''));
-  const suit = SUIT_LETTER_FROM_CLASS(cls);
-  if (rank && suit) return normalizeCard(`${rank}${suit}`);
+
+  // Fallback: rank from .value span, suit from .suit span (not .sub-suit).
+  const rankText = containerEl.querySelector('.value')?.textContent;
+  const suitText = containerEl.querySelector('.suit:not(.sub-suit)')?.textContent;
+  const rank = RANK_FROM_TEXT(rankText?.trim());
+  const suit = suitText?.trim()?.toLowerCase();
+  if (rank && suit && /^[hdsc]$/.test(suit)) {
+    return normalizeCard(`${rank}${suit}`);
+  }
+
   return null;
 };
 
@@ -142,8 +145,35 @@ export const readPot = () => {
 
 export const readToCall = () => {
   const el = document.querySelector(SEL.callButton);
-  if (!el) return 0; // no call button visible = nothing owed (check is free)
-  return parseAmount(el.textContent) ?? 0;
+  if (el) {
+    const n = parseAmount(el.textContent);
+    if (n != null) return n;
+  }
+  const buttons = document.querySelectorAll('.game-decisions-ctn .action-buttons button, .game-decisions-ctn .action-buttons [role="button"]');
+  for (const b of buttons) {
+    const txt = b.textContent || '';
+    if (/\bcall\b/i.test(txt)) {
+      const n = parseAmount(txt);
+      if (n != null) return n;
+    }
+  }
+  return 0; // no call button visible = nothing owed (check is free)
+};
+
+// True when the hero has actionable buttons in front of them — i.e., it's
+// hero's turn. We look for any action button (call/check/fold/raise/bet) inside
+// .game-decisions-ctn .action-buttons.
+export const readHeroToAct = () => {
+  const buttons = document.querySelectorAll('.game-decisions-ctn .action-buttons button, .game-decisions-ctn .action-buttons [role="button"]');
+  if (!buttons.length) return false;
+  for (const b of buttons) {
+    if (b.offsetParent === null) continue; // hidden via display:none / detached
+    const cls = Array.from(b.classList);
+    if (cls.some(c => /^(call|check|fold|raise|bet|all-?in|all\s*in)$/i.test(c))) return true;
+    const txt = (b.textContent || '').toLowerCase();
+    if (/\b(call|check|fold|raise|bet|all[\s-]?in)\b/.test(txt)) return true;
+  }
+  return false;
 };
 
 export const readBigBlind = () => {
@@ -156,18 +186,44 @@ export const readBigBlind = () => {
   return nums.length ? Math.max(...nums) : null;
 };
 
+// Extract Pokernow's seat number from a seat element's class list.
+// Seats have a class like "table-player-1", "table-player-5" — that's the
+// stable seat ID Pokernow uses to position the dealer button.
+const seatNumberFromEl = (el) => {
+  for (const c of el.classList) {
+    const m = c.match(/^table-player-(\d+)$/);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+};
+
+// Returns the seat number where the dealer button is sitting this hand, or null.
+const readDealerSeatNumber = () => {
+  const btn = document.querySelector(SEL.dealerButton);
+  if (!btn) return null;
+  for (const c of btn.classList) {
+    const m = c.match(/^dealer-position-(\d+)$/);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+};
+
 // Returns array of seat snapshots in DOM order (NOT poker order).
 export const readSeats = () => {
   const els = $$(document, SEL.allSeats);
+  const dealerSeatNum = readDealerSeatNumber();
   return els.map((el, i) => {
     const nameEl = el.querySelector(SEL.seatName);
     const stackEl = el.querySelector(SEL.seatStack);
+    const seatNum = seatNumberFromEl(el);
     return {
       domEl: el,
       name: nameEl?.textContent?.trim() || null,
       stack: parseAmount(stackEl?.textContent),
       isHero: el.classList.contains('you-player'),
-      isDealer: !!el.querySelector(SEL.dealerChip),
+      isDealer: seatNum != null && seatNum === dealerSeatNum,
+      isFolded: el.classList.contains('fold'),
+      seatNum,
       domOrderIndex: i,
     };
   });
@@ -221,6 +277,7 @@ export const readSnapshot = () => {
     board: readBoard(),
     pot: readPot(),
     toCall: readToCall(),
+    heroToAct: readHeroToAct(),
     bigBlind: readBigBlind(),
     seatsRaw: rawSeats,
     seatsOrdered: ordered, // ordered[0] is BTN, ordered[1] is SB, etc.

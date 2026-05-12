@@ -71,7 +71,12 @@ const init = () => {
     timer = null;
     try {
       const events = drainNewEvents();
-      for (const ev of events) applyEvent(ev);
+      for (const ev of events) {
+        if (window.__pokernowBridgeDebug) {
+          console.log('[pokernow-bridge] event:', ev);
+        }
+        applyEvent(ev);
+      }
     } catch (err) {
       console.error('[pokernow-bridge] event drain failed:', err);
     }

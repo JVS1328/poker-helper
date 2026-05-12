@@ -8,6 +8,9 @@ import { storage } from './storage';
 import { getVariant } from './variants';
 import { computeEquity } from './equity-engine';
 import { computeDisplayStats, classifyBucket, subscribeStats } from './stat-tracker';
+import { PokerLogic, parseCard } from '../poker-logic';
+
+const pokerLogic = new PokerLogic();
 
 const COLORS = {
   bg: 'rgba(20, 24, 30, 0.92)',
@@ -71,21 +74,22 @@ export const EquityPanel = ({ snapshot }) => {
     });
   };
 
-  // Recompute equity whenever inputs change.
+  // Recompute equity whenever inputs change. Use numInHand (excludes folded
+  // players) so equity reflects the actual decision you're facing.
   const variant = getVariant(snapshot.variant);
-  const numOpponents = Math.max(0, (snapshot.numPlayers || 0) - 1);
+  const numOpponents = Math.max(0, (snapshot.numInHand || snapshot.numPlayers || 0) - 1);
   const holeKey = snapshot.holeCards.join(',');
   const boardKey = snapshot.board.join(',');
 
-  // Build opponent buckets from stats (in poker-order, skipping the hero).
+  // Build opponent buckets from stats (in poker-order, skipping hero AND folded seats).
   const opponentBuckets = useMemo(() => {
     return snapshot.seats
-      .filter(s => !s.isHero && s.name)
+      .filter(s => !s.isHero && !s.isFolded && s.name)
       .map(s => {
         const ds = computeDisplayStats(s.name, 5);
         return ds.stats ? classifyBucket(ds.stats.vpip, ds.hands) : 'unknown';
       });
-  }, [snapshot.seats.map(s => s.name).join('|'), snapshot.handId]);
+  }, [snapshot.seats.map(s => `${s.name}:${s.isFolded ? 'F' : 'L'}`).join('|'), snapshot.handId]);
 
   // Only allow range mode when we actually have at least one classified opponent.
   const hasAnyClassified = opponentBuckets.some(b => b !== 'unknown');
@@ -151,6 +155,40 @@ export const EquityPanel = ({ snapshot }) => {
 
   const variantLabel = variant?.label || 'Unknown';
   const variantSupported = variant?.supportsEquity;
+
+  // Decision recommendation — reuses the same engine the standalone React app
+  // uses. NLHE only; only shown when it's hero's actual turn to act (action
+  // buttons visible). Otherwise the engine misreads "no call button" as "no
+  // bet to call → value-bet anything" and produces nonsense raises.
+  const decision = useMemo(() => {
+    if (snapshot.variant !== 'nlhe') return null;
+    if (snapshot.heroFolded) return null;
+    if (!snapshot.heroToAct) return null;
+    const parsedHole = snapshot.holeCards.map(parseCard).filter(Boolean);
+    if (parsedHole.length !== 2) return null;
+    const parsedBoard = snapshot.board.map(parseCard).filter(Boolean);
+    if (parsedBoard.length !== snapshot.board.length) return null;
+    if (!snapshot.heroPosition) return null;
+    const numForDecision = Math.max(2, snapshot.numInHand || snapshot.numPlayers || 2);
+    const pot = snapshot.pot ?? 0;
+    const call = snapshot.toCall ?? 0;
+    const stack = snapshot.heroStack ?? 0;
+    const bb = snapshot.bigBlind ?? 2;
+    try {
+      return pokerLogic.getDecision(parsedHole, parsedBoard, snapshot.heroPosition, numForDecision, pot, call, stack, bb);
+    } catch (e) {
+      return null;
+    }
+  }, [snapshot.variant, holeKey, boardKey, snapshot.heroPosition, snapshot.numInHand, snapshot.numPlayers, snapshot.pot, snapshot.toCall, snapshot.heroStack, snapshot.bigBlind, snapshot.heroFolded, snapshot.heroToAct]);
+
+  const actionColors = {
+    Fold:  { bg: 'rgba(248, 113, 113, 0.15)', border: COLORS.bad,    label: COLORS.bad },
+    Check: { bg: 'rgba(148, 163, 184, 0.15)', border: '#94a3b8',     label: '#cbd5e1' },
+    Call:  { bg: 'rgba(96, 165, 250, 0.18)',  border: COLORS.accent, label: COLORS.accent },
+    Raise: { bg: 'rgba(52, 211, 153, 0.18)',  border: COLORS.good,   label: COLORS.good },
+    Bet:   { bg: 'rgba(52, 211, 153, 0.18)',  border: COLORS.good,   label: COLORS.good },
+  };
+  const actC = decision ? (actionColors[decision.action] || actionColors.Check) : null;
 
   return (
     <div
@@ -234,6 +272,48 @@ export const EquityPanel = ({ snapshot }) => {
           {!variantSupported && (
             <div style={{ color: COLORS.warn, padding: '4px 0 8px', fontSize: 12 }}>
               {variantLabel} equity not yet implemented (Phase 5).
+            </div>
+          )}
+
+          {/* Action recommendation — NLHE only. The decision engine reuses the
+              same logic the standalone helper uses for picking Fold/Call/Raise. */}
+          {decision && actC && (
+            <div style={{
+              background: actC.bg,
+              border: `1px solid ${actC.border}`,
+              borderRadius: 6,
+              padding: '8px 10px',
+              marginBottom: 8,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 22, fontWeight: 700, color: actC.label, letterSpacing: 0.5 }}>
+                  {decision.action}
+                </span>
+                {decision.amount > 0 && (
+                  <span style={{ fontSize: 18, fontWeight: 600, color: COLORS.text, fontVariantNumeric: 'tabular-nums' }}>
+                    {fmtChips(decision.amount)}
+                  </span>
+                )}
+              </div>
+              {decision.reasoning && (
+                <div style={{ marginTop: 4, fontSize: 10, color: COLORS.textDim, lineHeight: 1.35 }}>
+                  {decision.reasoning}
+                </div>
+              )}
+            </div>
+          )}
+          {snapshot.heroFolded && (
+            <div style={{
+              background: 'rgba(148, 163, 184, 0.1)',
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 6,
+              padding: '6px 10px',
+              marginBottom: 8,
+              fontSize: 11,
+              color: COLORS.textDim,
+              fontStyle: 'italic',
+            }}>
+              You folded this hand. Stats keep tracking.
             </div>
           )}
 

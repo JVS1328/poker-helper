@@ -21,16 +21,19 @@ const seatOrderForPlayers = (n) => {
 
 const EMPTY_SNAPSHOT = {
   variant: 'nlhe',
-  numPlayers: 0,
+  numPlayers: 0,         // # of seated players (used for position labels)
+  numInHand: 0,          // # of non-folded players (used as numOpponents+1 for equity)
   bigBlind: null,
   pot: null,
   toCall: null,
+  heroToAct: false,      // true only when action buttons are visible to the hero
   holeCards: [],
   board: [],
-  seats: [],         // poker-order (0=BTN). Each: { name, stack, isHero, isDealer, domEl, position }
+  seats: [],             // poker-order (0=BTN). Each: { name, stack, isHero, isDealer, isFolded, domEl, position }
   heroSeatIndex: null,
   heroPosition: null,
   heroStack: null,
+  heroFolded: false,
   handId: null,
   updatedAt: 0,
 };
@@ -48,6 +51,7 @@ const seatsEqual = (a, b) => {
     if (a[i].stack !== b[i].stack) return false;
     if (a[i].isHero !== b[i].isHero) return false;
     if (a[i].isDealer !== b[i].isDealer) return false;
+    if (a[i].isFolded !== b[i].isFolded) return false;
   }
   return true;
 };
@@ -57,12 +61,15 @@ const cardsEqual = (a, b) => a.length === b.length && a.every((c, i) => c === b[
 const snapshotsEquivalent = (a, b) => (
   a.variant === b.variant &&
   a.numPlayers === b.numPlayers &&
+  a.numInHand === b.numInHand &&
   a.bigBlind === b.bigBlind &&
   a.pot === b.pot &&
   a.toCall === b.toCall &&
+  a.heroToAct === b.heroToAct &&
   a.heroSeatIndex === b.heroSeatIndex &&
   a.heroPosition === b.heroPosition &&
   a.heroStack === b.heroStack &&
+  a.heroFolded === b.heroFolded &&
   a.handId === b.handId &&
   cardsEqual(a.holeCards, b.holeCards) &&
   cardsEqual(a.board, b.board) &&
@@ -97,27 +104,32 @@ const buildSnapshot = () => {
     stack: s.stack,
     isHero: s.isHero,
     isDealer: s.isDealer,
+    isFolded: !!s.isFolded,
     domEl: s.domEl,
     position: positionLabels[i] || `Seat${i}`,
     pokerIndex: i,
   }));
 
   const heroSeat = seats.find(s => s.isHero) || null;
+  const numInHand = seats.filter(s => !s.isFolded).length;
 
   const handId = detectHandBoundary(orderedRaw, (raw.board || []).length);
 
   return {
     variant: raw.variant,
     numPlayers,
+    numInHand,
     bigBlind: raw.bigBlind,
     pot: raw.pot,
     toCall: raw.toCall,
+    heroToAct: !!raw.heroToAct,
     holeCards: raw.holeCards || [],
     board: raw.board || [],
     seats,
     heroSeatIndex: heroSeat ? heroSeat.pokerIndex : null,
     heroPosition: heroSeat ? heroSeat.position : null,
     heroStack: heroSeat ? heroSeat.stack : null,
+    heroFolded: heroSeat ? heroSeat.isFolded : false,
     handId,
     updatedAt: Date.now(),
   };

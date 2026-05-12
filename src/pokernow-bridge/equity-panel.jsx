@@ -144,8 +144,11 @@ export const EquityPanel = ({ snapshot }) => {
     ? eq * (pot + toCall) - (1 - eq) * toCall
     : null;
 
-  const spr = (stack != null && pot != null && pot > 0)
-    ? stack / pot
+  // SPR uses the effective stack (min of hero and deepest opponent), matching
+  // what the decision engine sees. Falls back to hero's stack if no opponents.
+  const sprStack = (effectiveStack > 0) ? effectiveStack : stack;
+  const spr = (sprStack != null && pot != null && pot > 0)
+    ? sprStack / pot
     : null;
 
   // Color the equity number relative to pot odds.
@@ -159,12 +162,77 @@ export const EquityPanel = ({ snapshot }) => {
   const variantLabel = variant?.label || 'Unknown';
   const variantSupported = variant?.supportsEquity;
 
+  // Effective stack for SPR — min of hero's stack and the deepest non-folded
+  // opponent. SPR using the deeper of the two understates commitment in a
+  // way that can mislead postflop decisions.
+  const effectiveStack = useMemo(() => {
+    const others = snapshot.seats.filter(s => !s.isHero && !s.isFolded);
+    if (!others.length) return snapshot.heroStack || 0;
+    const maxOther = others.reduce((m, s) => Math.max(m, s.stack || 0), 0);
+    return Math.min(snapshot.heroStack || 0, maxOther || (snapshot.heroStack || 0));
+  }, [snapshot.seats, snapshot.heroStack]);
+
+  // Position relative to remaining opponents. Postflop, the BTN (pokerIndex 0)
+  // acts last; otherwise the highest pokerIndex still in the hand. We compare
+  // hero's effective action order to the max to determine IP.
+  const heroIsIP = useMemo(() => {
+    const inHand = snapshot.seats.filter(s => !s.isFolded);
+    if (inHand.length <= 1) return true;
+    const hero = inHand.find(s => s.isHero);
+    if (!hero) return false;
+    const actionOrder = s => s.pokerIndex === 0 ? Number.MAX_SAFE_INTEGER : s.pokerIndex;
+    const maxAO = Math.max(...inHand.map(actionOrder));
+    return actionOrder(hero) === maxAO;
+  }, [snapshot.seats]);
+
+  // Villain bet-sizing tell. `pot` from Pokernow includes the chips committed
+  // this street (animations carry chips to the pot). Pot-at-time-of-bet ≈
+  // displayed pot − their bet. betSizing = bet / pot_before_bet.
+  const betSizing = useMemo(() => {
+    const pot = snapshot.pot;
+    const bet = snapshot.toCall;
+    if (!pot || !bet || pot <= bet) return null;
+    return bet / (pot - bet);
+  }, [snapshot.pot, snapshot.toCall]);
+
+  // Table looseness from HUD buckets — drives stealFriendly / tightenForLAG.
+  // Average bucket score over non-hero non-folded opponents. Scale: nit=0,
+  // tag=1, average=2, unknown=2, loose=3, whale=4.
+  const tableLooseness = useMemo(() => {
+    const buckets = opponentBuckets;
+    if (!buckets.length) return 2;
+    const W = { whale: 4, loose: 3, average: 2, tag: 1, nit: 0, unknown: 2 };
+    return buckets.reduce((s, b) => s + (W[b] ?? 2), 0) / buckets.length;
+  }, [opponentBuckets]);
+
+  // Steal-friendly when the table is dominated by nits/tags (looseness < 1).
+  // Tighten when LAGs / whales are present (looseness > 2.7).
+  // Only applies preflop opens (CO/BTN/SB). Otherwise unused.
+  const stealFriendly = tableLooseness < 1.0;
+  const tightenForLAG = tableLooseness > 2.7;
+
+  // The bucket of the preflop opener (used to size 3-bet ranges). We approximate
+  // "opener" as the most recently-not-yet-folded player whose stack went down by
+  // > BB — but we don't track that yet. As a proxy, if we're facing an open
+  // (toCall ≈ 2-4 BB preflop), the average of the non-hero, non-folded buckets
+  // approximates the opener-type pressure. For now, just hand the engine a
+  // single bucket label derived from the same looseness metric.
+  const openerBucket = useMemo(() => {
+    if (snapshot.board.length > 0) return undefined;
+    if (snapshot.toCall <= 0) return undefined;
+    const bb = snapshot.bigBlind || 2;
+    if (snapshot.toCall < bb * 1.5) return undefined; // limp / no real open
+    if (tableLooseness < 1) return 'nit';
+    if (tableLooseness < 1.7) return 'tag';
+    if (tableLooseness < 2.7) return 'average';
+    if (tableLooseness < 3.3) return 'loose';
+    return 'whale';
+  }, [tableLooseness, snapshot.toCall, snapshot.bigBlind, snapshot.board.length]);
+
   // Decision recommendation — reuses the standalone React app's engine. NLHE
-  // only; only shown when it's hero's actual turn to act (action buttons
-  // visible). Postflop decisions are fed the SAME equity number displayed in
-  // the panel — when range mode is active, that's vs-estimated-ranges, so the
-  // recommendation tightens up vs vs-random (which systematically overrates
-  // marginal hands because real opponents who continue aren't random).
+  // only; only shown when it's hero's actual turn to act. Now also threads
+  // through: heroIsIP, effectiveStack, betSizing, stealFriendly, tightenForLAG,
+  // openerBucket — see PokerLogic.getDecisionFromEquity for what each affects.
   const decision = useMemo(() => {
     if (snapshot.variant !== 'nlhe') return null;
     if (snapshot.heroFolded) return null;
@@ -180,22 +248,31 @@ export const EquityPanel = ({ snapshot }) => {
     const stack = snapshot.heroStack ?? 0;
     const bb = snapshot.bigBlind ?? 2;
 
-    // Preflop uses range tables, not equity — safe to call getDecision (it
-    // computes its own equity but ignores it for the preflop branch).
+    const context = {
+      heroIsIP, effectiveStack, betSizing,
+      stealFriendly, tightenForLAG, openerBucket,
+    };
+
+    // Preflop: use range tables (+ context for steal/tighten/opener-bucket).
+    // Engine's preflop logic ignores equity but uses the other context flags.
     if (parsedBoard.length === 0) {
       try {
-        return pokerLogic.getDecision(parsedHole, parsedBoard, snapshot.heroPosition, numForDecision, pot, call, stack, bb);
+        return pokerLogic.getDecisionFromEquity(
+          parsedHole, parsedBoard, snapshot.heroPosition, numForDecision, pot, call, stack, bb,
+          { equity: 0, iterations: 0 },
+          context,
+        );
       } catch (e) { return null; }
     }
 
-    // Postflop: feed in our pre-computed equity (range-aware when toggle is on).
-    // If our equity isn't ready yet, fall back to letting the engine compute
-    // its own vs-random equity so we don't show "no recommendation" mid-tick.
+    // Postflop: feed pre-computed equity (range-aware when toggle is on).
+    // Fall back to engine's own MC if our equity isn't ready yet.
     if (equity && equity.equity != null) {
       try {
         return pokerLogic.getDecisionFromEquity(
           parsedHole, parsedBoard, snapshot.heroPosition, numForDecision, pot, call, stack, bb,
-          { equity: equity.equity, iterations: equity.iterations || 1000 }
+          { equity: equity.equity, iterations: equity.iterations || 1000 },
+          context,
         );
       } catch (e) { return null; }
     }
@@ -208,8 +285,8 @@ export const EquityPanel = ({ snapshot }) => {
     snapshot.variant, holeKey, boardKey, snapshot.heroPosition,
     snapshot.numInHand, snapshot.numPlayers, snapshot.pot, snapshot.toCall,
     snapshot.heroStack, snapshot.bigBlind, snapshot.heroFolded, snapshot.heroToAct,
-    // Recompute when equity changes (mode flip, range bucket change, new card).
     equity?.equity, equity?.mode,
+    heroIsIP, effectiveStack, betSizing, stealFriendly, tightenForLAG, openerBucket,
   ]);
 
   const actionColors = {
@@ -376,10 +453,26 @@ export const EquityPanel = ({ snapshot }) => {
             <div style={{ marginTop: 4 }}>
               {snapshot.heroPosition && <span>You: {snapshot.heroPosition}</span>}
               {snapshot.numPlayers ? <span> · {snapshot.numPlayers}-handed</span> : null}
+              {snapshot.heroToAct && snapshot.board.length > 0 && (
+                <span> · {heroIsIP ? 'IP' : 'OOP'}</span>
+              )}
               {effectiveMode === 'ranges' && (
                 <span> · vs {opponentBuckets.map(b => b[0].toUpperCase()).join('')}</span>
               )}
             </div>
+            {(stealFriendly || tightenForLAG) && snapshot.board.length === 0 && (
+              <div style={{ marginTop: 2, color: stealFriendly ? COLORS.good : COLORS.warn }}>
+                {stealFriendly ? '🎯 Steal-friendly table (nits behind)' : '⚠ LAGs behind — tightening opens'}
+              </div>
+            )}
+            {betSizing != null && (
+              <div style={{ marginTop: 2 }}>
+                Their bet is {Math.round(betSizing * 100)}% pot
+                {betSizing > 1.0 ? ' (overbet — polarized)' :
+                 betSizing > 0.66 ? ' (big — value-leaning)' :
+                 betSizing < 0.34 ? ' (small — often weak)' : ''}
+              </div>
+            )}
           </div>
         </div>
       )}

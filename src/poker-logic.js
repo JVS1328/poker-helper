@@ -258,6 +258,38 @@ const OPEN_RANGES = {
   'BB': new Set(),
 };
 
+// Wider steal ranges from CO/BTN/SB — applied when context.stealFriendly is true
+// (all remaining players behind hero are nits / tight). Adds hands a TAG would
+// open vs weak fields but skip vs unknowns.
+const STEAL_EXTRA_CO = [
+  'K4s', 'K3s', 'K2s', 'Q5s', 'Q4s', 'J6s', 'T6s', '95s', '85s', '64s', '54s',
+  'A6o', 'A5o', 'A4o', 'A3o', 'A2o', 'K8o', 'K7o', 'Q9o', 'J9o', 'T9o', '98o',
+];
+const STEAL_EXTRA_BTN = [
+  ...STEAL_EXTRA_CO,
+  'Q5o', 'Q4o', 'J8o', 'J7o', 'T8o', '97o', '87o', '76o', '65o',
+  '74s', '63s', '53s', '43s',
+];
+const STEAL_EXTRA_SB = [
+  ...STEAL_EXTRA_CO,
+  'A4o', 'A3o', 'A2o', 'K6o', 'K5o', 'K4o',
+];
+
+const STEAL_RANGES = {
+  'CO':     new Set([...OPEN_CO, ...STEAL_EXTRA_CO]),
+  'BTN':    new Set([...OPEN_BTN, ...STEAL_EXTRA_BTN]),
+  'BTN/SB': new Set([...OPEN_BTN, ...STEAL_EXTRA_BTN]),
+  'SB':     new Set([...OPEN_SB, ...STEAL_EXTRA_SB]),
+};
+
+// Tight value-only opens for when LAGs sit behind us — we get 3-bet too often
+// to profitably open marginal hands. Top ~12% of hands.
+const TIGHT_OPEN = new Set([
+  'AA','KK','QQ','JJ','TT','99',
+  'AKs','AQs','AJs','ATs','KQs','KJs','QJs',
+  'AKo','AQo',
+]);
+
 // Hands you'd 3-bet (re-raise) facing a single open
 const RANGE_3BET = new Set([
   'AA', 'KK', 'QQ', 'JJ',
@@ -293,7 +325,7 @@ const seatBucket = (seat) => {
   return 'early';
 };
 
-const getPreflopDecision = ({ holeCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind }) => {
+const getPreflopDecision = ({ holeCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, stealFriendly, tightenForLAG, openerBucket }) => {
   const hand = handToNotation(holeCards);
   const bb = bigBlind > 0 ? bigBlind : 1;
   const toCallBB = currentBet / bb;
@@ -307,8 +339,20 @@ const getPreflopDecision = ({ holeCards, seat, numPlayers, potSize, currentBet, 
   else if (toCallBB <= 13) state = '3bet'; // someone 3-bet
   else state = '4bet';
 
-  const openRange = OPEN_RANGES[seat] ?? new Set();
+  // Open range — start with the standard table, then adjust for opponent type:
+  // - stealFriendly (all nits behind): use wider steal range from CO/BTN/SB
+  // - tightenForLAG (loose players behind): cap at top ~12% of hands
+  let openRange = OPEN_RANGES[seat] ?? new Set();
+  if (tightenForLAG) {
+    // Intersect — keep only hands that are BOTH in the standard range AND tight.
+    const tight = new Set();
+    for (const h of openRange) if (TIGHT_OPEN.has(h)) tight.add(h);
+    openRange = tight;
+  } else if (stealFriendly && STEAL_RANGES[seat]) {
+    openRange = STEAL_RANGES[seat];
+  }
   const inOpenRange = openRange.has(hand);
+  const isWiderOpen = stealFriendly && STEAL_RANGES[seat] && !(OPEN_RANGES[seat]?.has(hand)) && openRange.has(hand);
 
   // Standardized sizing helpers (returns chips)
   const openSize = Math.round(3 * bb); // 3 BB open
@@ -318,9 +362,11 @@ const getPreflopDecision = ({ holeCards, seat, numPlayers, potSize, currentBet, 
   if (state === 'checked' || state === 'limp') {
     if (inOpenRange) {
       const sizing = state === 'limp' ? Math.round(openSize + currentBet) : openSize;
+      const widenNote = isWiderOpen ? ' (steal — blinds are tight)' : '';
+      const tightNote = tightenForLAG ? ' (tight open — LAGs behind)' : '';
       return {
         action: 'Raise', amount: sizing,
-        reasoning: `${hand} is in the opening range from ${seat}. Standard ${state === 'limp' ? 'iso-raise' : 'open'} ~3 BB.`,
+        reasoning: `${hand} opens from ${seat}${widenNote}${tightNote}. Standard ${state === 'limp' ? 'iso-raise' : 'open'} ~3 BB.`,
       };
     }
     if (state === 'checked') {
@@ -330,10 +376,21 @@ const getPreflopDecision = ({ holeCards, seat, numPlayers, potSize, currentBet, 
   }
 
   if (state === 'open') {
-    if (RANGE_3BET.has(hand)) {
+    // 3-bet range adjusts to opener type:
+    //   tight opener (nit / TAG): polarized — only premium value 3-bets (no light)
+    //   loose opener (whale / loose): widen 3-bet for value
+    let threeBetSet = RANGE_3BET;
+    if (openerBucket === 'whale' || openerBucket === 'loose') {
+      threeBetSet = new Set([...RANGE_3BET, 'JJ', 'TT', 'AQo', 'AJs']); // widen for value
+    } else if (openerBucket === 'nit') {
+      threeBetSet = new Set(['AA', 'KK', 'QQ', 'AKs', 'AKo']); // premium only — nits don't fold light
+    }
+
+    if (threeBetSet.has(hand)) {
+      const tag = openerBucket && openerBucket !== 'unknown' ? ` vs ${openerBucket} opener` : '';
       return {
         action: 'Raise', amount: threeBetSize,
-        reasoning: `${hand} 3-bets for value vs. an open. Size ~3× their raise.`,
+        reasoning: `${hand} 3-bets for value${tag}. Size ~3× their raise.`,
       };
     }
     if (RANGE_CALL_RAISE.has(hand)) {
@@ -349,7 +406,6 @@ const getPreflopDecision = ({ holeCards, seat, numPlayers, potSize, currentBet, 
       };
     }
     if (seat === 'BB' && toCallBB <= 3.5 && openRange.has(hand)) {
-      // BB defends wider when getting a price
       return {
         action: 'Call', amount: currentBet,
         reasoning: `BB defending ${hand} — getting a price (${toCallBB.toFixed(1)} BB to call).`,
@@ -396,68 +452,103 @@ const getPreflopDecision = ({ holeCards, seat, numPlayers, potSize, currentBet, 
   return { action: 'Fold', amount: 0, reasoning: `${hand} folds vs. a 4-bet.` };
 };
 
-const getPostflopDecision = ({ holeCards, communityCards, numPlayers, potSize, currentBet, stackSize, equityResult }) => {
+const getPostflopDecision = ({
+  holeCards, communityCards, numPlayers, potSize, currentBet, stackSize, equityResult,
+  heroIsIP, effectiveStack, betSizing,
+}) => {
   const equity = equityResult.equity;
   const numOpponents = numPlayers - 1;
   const myScore = score7([...holeCards, ...communityCards]);
   const handCat = handCategoryFromScore(myScore);
   const handName = HAND_RANK_NAME[handCat] || 'hand';
   const potOdds = currentBet > 0 ? currentBet / (potSize + currentBet) : 0;
-  const spr = potSize > 0 ? stackSize / potSize : Infinity;
+
+  // Effective stack — what's actually in play between hero and the deepest
+  // opponent still in the hand. Falls back to hero's stack if not provided.
+  const effStack = (typeof effectiveStack === 'number' && effectiveStack > 0)
+    ? Math.min(effectiveStack, stackSize)
+    : stackSize;
+  const spr = potSize > 0 ? effStack / potSize : Infinity;
   const equityPct = (equity * 100).toFixed(0);
+
+  // Position-adjusted equity buffer. IP players realize more of their equity
+  // (act last → can check back / bluff-catch optimally); OOP players realize
+  // less. Multiway pots also raise required equity because more opponents
+  // means more chances to be outdrawn.
+  const positionPenalty = (heroIsIP === false) ? 0.04 : 0.02;
+  const multiwayPenalty = numOpponents > 1 ? 0.03 * (numOpponents - 1) : 0;
+
+  // Bet-sizing tell adjustments (only relevant when facing a bet).
+  // betSizing = villain's bet / pot-at-time-of-bet (≈ currentBet / (pot - currentBet)).
+  //   ≤ 33% pot:  small probe/block — range is weaker → call slightly wider
+  //   33–66%:     standard cbet — no adjustment
+  //   66–100%:    larger value-leaning bet → require more equity to call
+  //   > 100%:     overbet, polarized — fold marginal hands
+  let sizingAdjust = 0;
+  let sizingNote = '';
+  if (currentBet > 0 && betSizing != null && Number.isFinite(betSizing) && betSizing > 0) {
+    if (betSizing > 1.0) { sizingAdjust = 0.06; sizingNote = ' (overbet — polarized)'; }
+    else if (betSizing > 0.66) { sizingAdjust = 0.03; sizingNote = ' (big bet — value-leaning)'; }
+    else if (betSizing < 0.34) { sizingAdjust = -0.02; sizingNote = ' (small bet — weak range)'; }
+  }
+
+  const requiredEquity = Math.max(0, potOdds + positionPenalty + multiwayPenalty + sizingAdjust);
+
+  const positionTag = heroIsIP === false ? 'OOP' : heroIsIP === true ? 'IP' : '';
 
   // No bet to call — bet/check decision
   if (currentBet === 0) {
+    // Stronger raise threshold IP than OOP — OOP raises commit you to the hand harder.
     if (equity > 0.7) {
       const size = Math.min(Math.round(potSize * 0.75), stackSize);
       return {
         action: 'Raise', amount: size,
-        reasoning: `${handName} with ${equityPct}% equity vs. ${numOpponents} — value bet 3/4 pot.`,
+        reasoning: `${handName} ${equityPct}% equity vs. ${numOpponents}${positionTag ? ' ' + positionTag : ''} — value bet 3/4 pot.`,
       };
     }
     if (equity > 0.5 && spr < 4) {
       const size = Math.min(Math.round(potSize * 0.5), stackSize);
       return {
         action: 'Raise', amount: size,
-        reasoning: `${handName} ${equityPct}% equity, low SPR — bet for value/protection.`,
+        reasoning: `${handName} ${equityPct}% equity, low SPR (${spr.toFixed(1)}) — bet for value/protection.`,
       };
     }
-    if (equity > 0.45 && numOpponents <= 2) {
+    if (equity > 0.5 && heroIsIP && numOpponents <= 2) {
       const size = Math.min(Math.round(potSize * 0.5), stackSize);
       return {
         action: 'Raise', amount: size,
-        reasoning: `${handName} ${equityPct}% equity heads/3-up — thin value bet.`,
+        reasoning: `${handName} ${equityPct}% equity heads-up/3-up IP — thin value bet.`,
       };
     }
     return {
       action: 'Check', amount: 0,
-      reasoning: `${handName} ${equityPct}% equity vs. ${numOpponents} — check, not strong enough to bet.`,
+      reasoning: `${handName} ${equityPct}% equity vs. ${numOpponents}${positionTag ? ' ' + positionTag : ''} — check, not strong enough to bet.`,
     };
   }
 
-  // Facing a bet: compare equity to pot odds (with a small buffer for being out of position / multiway)
-  const requiredEquity = potOdds + (numOpponents > 1 ? 0.05 : 0.02);
+  // Facing a bet — raise / call / fold using required-equity threshold.
 
-  // Strong: raise for value
-  if (equity > 0.75) {
+  // Strong: raise for value. Bump threshold slightly when facing a polarized
+  // overbet (their range is nuts or air; raising into nuts loses big).
+  const raiseThreshold = betSizing != null && betSizing > 1.0 ? 0.80 : 0.75;
+  if (equity > raiseThreshold) {
     const size = Math.min(Math.round(currentBet * 2.5 + potSize * 0.5), stackSize);
     return {
       action: 'Raise', amount: size,
-      reasoning: `${handName} ${equityPct}% equity — raise for value.`,
+      reasoning: `${handName} ${equityPct}% equity${sizingNote} — raise for value.`,
     };
   }
 
-  // Decent + getting a good price
   if (equity > requiredEquity) {
     return {
       action: 'Call', amount: currentBet,
-      reasoning: `${handName} ${equityPct}% equity beats the price (need ${(requiredEquity * 100).toFixed(0)}%).`,
+      reasoning: `${handName} ${equityPct}% beats price (need ${(requiredEquity * 100).toFixed(0)}%${positionTag ? ', ' + positionTag : ''}${sizingNote}).`,
     };
   }
 
   return {
     action: 'Fold', amount: 0,
-    reasoning: `${handName} only ${equityPct}% equity vs. ${(requiredEquity * 100).toFixed(0)}% needed — fold.`,
+    reasoning: `${handName} only ${equityPct}% vs. ${(requiredEquity * 100).toFixed(0)}% needed${positionTag ? ', ' + positionTag : ''}${sizingNote} — fold.`,
   };
 };
 
@@ -468,12 +559,22 @@ export class PokerLogic {
     return this.getDecisionFromEquity(holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult);
   }
 
-  // Same as getDecision but accepts a pre-computed equityResult instead of
-  // running its own Monte Carlo. Lets the Pokernow bridge feed in
-  // equity-vs-estimated-ranges (Phase 3) so postflop recommendations use
-  // contextually accurate equity instead of vs-random.
-  getDecisionFromEquity(holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult) {
-    const ctx = { holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult };
+  // Same as getDecision but accepts a pre-computed equityResult AND an optional
+  // context object carrying additional table info the Pokernow bridge can
+  // observe but the standalone React UI can't:
+  //   context.heroIsIP        true if hero acts last postflop among non-folded
+  //   context.effectiveStack  min(heroStack, deepest other non-folded stack)
+  //   context.betSizing       villain's bet / pot-at-time-of-bet (0..2+)
+  //   context.stealFriendly   all players behind hero are nits (open wider)
+  //   context.tightenForLAG   LAGs sit behind hero (tighten opens)
+  //   context.openerBucket    bucket of the preflop opener (for 3-bet sizing)
+  // All context fields are optional — when omitted, behavior matches the
+  // pre-context engine used by the standalone React app.
+  getDecisionFromEquity(holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult, context = {}) {
+    const ctx = {
+      holeCards, communityCards, seat, numPlayers, potSize, currentBet, stackSize, bigBlind, equityResult,
+      ...context,
+    };
     const base = communityCards.length === 0
       ? getPreflopDecision(ctx)
       : getPostflopDecision(ctx);

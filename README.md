@@ -65,12 +65,13 @@ The dropdown shows specific seats; the engine internally maps them to one of fou
 
 Acting later in the betting round = strictly better. The engine plays much tighter from early/blind seats and much looser from late seats.
 
-## Caveats
+## Caveats (standalone React UI)
 
-- **Equity is vs. random hands**, not vs. opponent ranges. Real opponents don't show up with 7-2 offsuit, so the displayed equity is slightly optimistic. Useful as a sanity check, not gospel.
-- **No opponent modeling** — the tool doesn't know who's tight, loose, or bluffing. It plays "honest" recommendations only.
+- **Equity is vs. random hands**, not vs. opponent ranges. Real opponents don't show up with 7-2 offsuit, so the displayed equity is slightly optimistic. Useful as a sanity check, not gospel. *The Pokernow Bridge (below) addresses this with range-aware equity once HUD data exists.*
+- **No opponent modeling** — the tool doesn't know who's tight, loose, or bluffing. It plays "honest" recommendations only. *The Pokernow Bridge adds opponent-type classification (Whale/Loose/Average/TAG/Nit) and feeds it into preflop ranges + postflop equity.*
 - **No bluffing / semi-bluff raise logic** — strong draws are evaluated by their raw equity but won't be recommended as bluff-raises.
 - **Preflop ranges are ~6-max defaults** — feel a bit loose for tight 9-handed games. Adjust your `Players` accordingly.
+- **No bet-sizing tell adjustments or IP/OOP buffer in the standalone UI.** These live in the decision engine but require additional context the standalone UI doesn't pass — the Pokernow Bridge passes them automatically.
 
 ## Technical stack
 - React 18 (Create React App)
@@ -149,16 +150,34 @@ The local userscript is **unminified with inline sourcemaps**, so Pokernow's Dev
 
 ### What you get
 
+- **Action recommendation (Fold / Check / Call / Raise + sizing + reasoning)** — gated to only appear when it's actually your turn to act (action buttons visible). Reuses the standalone decision engine plus the Pokernow-only context below.
 - **Live equity %** — Monte Carlo, updates as community cards appear, colored green when you beat pot odds and red when you don't.
-- **Pot odds** — the call-vs-pot price you need to beat.
-- **EV of call** — expected chips won/lost on calling.
-- **SPR** — stack-to-pot ratio.
-- **Range-aware equity (`vs rng` toggle)** — once you've played enough hands with the table for the HUD to classify opponents, switch the equity panel to compute equity against each opponent's *estimated range* (Whale 70% / Loose 45% / Average 28% / TAG 18% / Nit 8%). Matches the methodology Equibrah documents on their "How equity works" page.
+- **Pot odds, required equity, EV of call, SPR** — the standard derived numbers. SPR uses the **effective stack** (min of hero and deepest non-folded opponent), matching what the decision engine sees.
+- **Range-aware equity (`vs rng` toggle)** — flip to compute equity against each opponent's *estimated range* (Whale 70% / Loose 45% / Average 28% / TAG 18% / Nit 8%) based on their live HUD stats. Opponents without enough hands default to the "unknown" 40% bucket — still tighter and more honest than vs-random's effective 100% range. The active equity is fed into the recommendation engine too, so the action label also tightens on marginal hands.
 - **Position badge** — BTN / SB / BB / UTG / etc., color-coded, anchored over your seat.
-- **HUD shells** — per-opponent boxes showing live VPIP / PFR / 3-bet / AF / hand count, color-tinted by player bucket (Whale pink / Loose amber / TAG blue / Nit emerald). Click the player's name to add or edit a personal note.
+- **HUD shells** — per-opponent boxes showing live VPIP / PFR / 3-bet / AF / hand count, color-tinted by player bucket (Whale pink / Loose amber / TAG blue / Nit emerald). Click the player's name to add or edit a personal note. Folded opponents dim to 45% opacity.
 - **Multi-table sync** — stats persist across all your Pokernow tabs via Tampermonkey storage with cross-tab change listeners; an opponent playing at multiple of your tables aggregates into one profile in real-time.
 - **Variants** — NLHE (browser-side Monte Carlo, ~1200 iters), PLO and PLO5 (high), PLO Hi/Lo and PLO5 Hi/Lo (8-or-better split-pot logic). PLO variants run fewer iterations because of the larger combination space — no server-side fallback (project constraint).
 - **Drag-to-position + persistent layout** — drag the panel header or any HUD shell; positions persist.
+
+### Pokernow-aware decision context
+
+When the bridge calls the decision engine, it passes a context object the standalone React UI can't observe. Each of these moves the recommendation closer to elite play:
+
+- **Position awareness (IP vs OOP).** Hero acting last postflop (BTN among non-folded) gets a smaller required-equity buffer (+2%); acting earlier (OOP) gets +6%. Multiway pots add +3% per extra opponent. Reasoning text shows the position tag.
+- **Effective stack for SPR & commitment.** `min(hero stack, deepest non-folded opponent stack) / pot`. Prevents the "I have 5,000 chips so my SPR is huge" misreading when your opponent is sitting on 800.
+- **Bet-sizing tells.** Required equity adjusts to villain's bet-relative-to-pot:
+  - ≤ 33% pot → −2% (small bets often weak/marginal, call wider)
+  - 33–66% → ±0 (standard cbet)
+  - 66–100% → +3% (value-leaning)
+  - > 100% → +6% required + raise-for-value threshold bumps to 80% equity (don't raise into polarized overbet ranges)
+- **Opponent-type-aware preflop ranges.**
+  - *Steal mode* (all opponents at the table are nits / TAGs): opens widen from CO/BTN/SB to include A2o+, K-suited, suited 1-gappers, etc. Reasoning shows "(steal — blinds are tight)".
+  - *Tighten mode* (LAGs / whales present): opens contract to top ~12% only.
+  - *3-bet sizing*: facing a Whale or Loose opener, 3-bet range expands for value (adds JJ / TT / AQo / AJs). Facing a Nit, contracts to premium only (AA / KK / QQ / AKs / AKo) — nits don't fold to light 3-bets.
+- **Range-aware equity vs whichever bucket each villain is in.** Drives postflop decisions when `vs rng` is on (Phase 3). On marginal hands like K-high heads-up, the recommendation correctly says "check" against a TAG range where vs-random would have said "thin value raise".
+
+The panel footer surfaces what's currently in play: `IP` / `OOP` tag, "Their bet is 19% pot (small — weak)" sizing note, 🎯 "Steal-friendly table" or ⚠ "LAGs behind" banner preflop.
 
 ### Debug
 
@@ -173,10 +192,11 @@ then reload — every DOM selector miss logs to the console. Useful if Pokernow'
 | Phase | Feature | Status |
 |---|---|---|
 | 1 | DOM reader, equity / pot-odds panel, HUD shells, position badge, variant abstraction | ✅ done |
-| 2 | Opponent action tracking via on-page action log → VPIP / PFR / 3-bet / fold-to-3bet / c-bet / fold-to-cbet / AF / WTSD / W$SD / limps in shells; player notes; bucket coloring | ✅ done |
+| 2 | Opponent action tracking via per-seat bet-value diffing → VPIP / PFR / 3-bet / fold-to-3bet / c-bet / fold-to-cbet / AF / WTSD / W$SD / limps in shells; player notes; bucket coloring | ✅ done |
 | 3 | Equity vs. **estimated range per opponent** using HUD-stat-driven Whale/Loose/Average/TAG/Nit buckets | ✅ done |
 | 4 | Multi-table aggregation (cross-tab listener on opponent profiles) | ✅ done |
 | 5 | PLO / PLO5 / PLO Hi-Lo / PLO5 Hi-Lo evaluators | ✅ done |
+| 6 | Decision engine accuracy: IP/OOP buffer, effective-stack SPR, bet-sizing tells, opponent-type-aware preflop ranges, range-aware equity feeding the recommendation | ✅ done |
 
 Explicit non-goals: hand history / replayer, LLM "AI coach" features, cloud sync.
 

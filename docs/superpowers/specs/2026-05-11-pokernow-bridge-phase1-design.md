@@ -2,9 +2,12 @@
 
 ## Goal
 
-Bring real-time equity / pot-odds information onto `pokernow.com/games/*` without leaving the page, and stand up the per-seat overlay framework that Phase 2+ will fill with opponent stats. Long-term target is feature parity with Equibrah Pro / "PokerNow HUD & Odds Calculator" Chrome extension. Phase 1 is the foundation; later phases add HUD stats, hand history, replayer, range analysis.
+Bring real-time equity / pot-odds information onto `pokernow.com/games/*` without leaving the page, and stand up the per-seat overlay framework that Phase 2+ will fill with opponent stats. Long-term target is feature parity with Equibrah Pro / "PokerNow HUD & Odds Calculator" Chrome extension, **minus AI features and hand history**. Phase 1 is the foundation; later phases add HUD stats and range analysis.
 
-User constraint: **no Chrome extension**. The whole thing rides on a single Tampermonkey userscript.
+User constraints:
+- **No Chrome extension.** The whole thing rides on a single Tampermonkey userscript.
+- **No "live AI" / coaching suggestions / LLM-driven anything.** All recommendations are derived from deterministic poker math (Monte Carlo equity, pot odds, EV) reusing the existing rule-based engine in `src/poker-logic.js`. The Anthropic API integration in `src/vlm-client.js` is for screen-reading on non-Pokernow sites and is not part of this bridge.
+- **No hand history / replayer / saved hands.** Every action is read live from the DOM and discarded. Phase 2's HUD stats will be computed from rolling counters per opponent, not from stored hand records.
 
 ## Scope
 
@@ -17,11 +20,15 @@ In (Phase 1):
 
 Out (Phase 1, deferred to later phases):
 - VPIP / PFR / 3-bet / AF / fold-to-3bet / W$SD / WTSD / etc. — Phase 2.
-- Game-log polling and per-hand action recording — Phase 2 (the data source for HUD stats).
+- Game-log polling for authoritative action data, used to drive HUD stat counters — Phase 2.
 - Color-coded player types, manual notes — Phase 2.
-- Hand history database, replayer — Phase 3.
-- Range estimation, equity-vs-range, hand filters — Phase 4.
-- Multi-table aggregation, cloud sync — Phase 5 (cloud sync requires a backend, out of scope entirely for now).
+- Range estimation, equity-vs-range — Phase 3.
+- Multi-table aggregation — Phase 4.
+
+Out permanently (explicit non-goals per user):
+- Hand history storage / saved hands / replayer.
+- Any LLM-based or "AI coach" features. All math is deterministic.
+- Cloud sync of opponent profiles (would require a backend).
 
 ## Architecture
 
@@ -192,7 +199,7 @@ pokernow-bridge:settings             →  { debug, statsVisible: { vpip, pfr, ..
 pokernow-bridge:version              →  "1"  (for future migration)
 ```
 
-Phase 2 will add `pokernow-bridge:opponents:<playerName>` per-villain action histories. The Phase 1 schema is set up to leave that namespace untouched.
+Phase 2 will add `pokernow-bridge:opponents:<playerName>` per-villain **rolling stat counters** (not full hand records). The Phase 1 schema is set up to leave that namespace untouched.
 
 ## Build & deployment
 
